@@ -1,0 +1,32 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build wc.so",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "go build -buildmode=plugin -o src/mrapps/wc.so src/mrapps/wc.go"],
+      "group": "build",
+      "problemMatcher": ["$go"],
+      "detail": "Build word count plugin"
+    },
+    {
+      "label": "Build indexer.so",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "go build -buildmode=plugin -o src/mrapps/indexer.so src/mrapps/indexer.go"],
+      "group": "build",
+      "problemMatcher": ["$go"],
+      "detail": "Build indexer plugin"
+    },
+    {
+      "label": "Build all plugins",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "go build -buildmode=plugin -o src/mrapps/wc.so src/mrapps/wc.go && go build -buildmode=plugin -o src/mrapps/indexer.so src/mrapps/indexer.go"],
+      "group": "build",
+      "problemMatcher": ["$go"],
+      "detail": "Build both wc and indexer plugins"
+    }
+  ]
+}

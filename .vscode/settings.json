@@ -1,0 +1,14 @@
+{
+    "go.gopath": "/home/citizen/go",
+    "go.goroot": "/usr/local/go",
+    "go.useLanguageServer": true,
+    "go.lintTool": "golint",
+    "go.lintOnSave": "package",
+    "go.vetOnSave": "package",
+    "go.buildFlags": [],
+    "go.testFlags": [],
+    "go.coverOnSave": false,
+    "go.useCodeSnippetsOnFunctionSuggest": true,
+    "go.formatTool": "gofmt",
+    "go.docsTool": "gogetdoc"
+}

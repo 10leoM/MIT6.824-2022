@@ -1,0 +1,107 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Hello World",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/lesson"
+        },
+        {
+            "name": "Run Current File",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${file}"
+        },
+        {
+            "name": "Build All",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "Run MR Sequential",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrsequential.go",
+            "args": [
+                "${workspaceFolder}/src/main/pg-being_ernest.txt",
+                "${workspaceFolder}/src/main/pg-dorian_gray.txt"
+            ]
+        },
+        {
+            "name": "MapReduce Master",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrmaster.go",
+            "args": [
+                "${workspaceFolder}/src/main/pg-being_ernest.txt",
+                "${workspaceFolder}/src/main/pg-dorian_gray.txt",
+                "${workspaceFolder}/src/main/pg-frankenstein.txt"
+            ]
+        },
+        {
+            "name": "MapReduce Worker (wc)",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrworker.go",
+            "preLaunchTask": "Build wc.so",
+            "args": [
+                "${workspaceFolder}/src/mrapps/wc.so"
+            ]
+        },
+        {
+            "name": "MapReduce Worker (indexer)",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrworker.go",
+            "preLaunchTask": "Build indexer.so",
+            "args": [
+                "${workspaceFolder}/src/mrapps/indexer.so"
+            ]
+        },
+        {
+            "name": "Run Raft Tests (single file)",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}/src/raft",
+            "args": ["-test.run", "TestInitialElection"]
+        },
+        {
+            "name": "Run All Raft Tests",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}/src/raft"
+        },
+        {
+            "name": "Run KV Tests",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}/src/kvraft"
+        },
+        {
+            "name": "Run ShardMaster Tests",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}/src/shardmaster"
+        },
+        {
+            "name": "Run ShardKV Tests",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}/src/shardkv"
+        }
+    ]
+}
