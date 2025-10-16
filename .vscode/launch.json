@@ -2,39 +2,39 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run Hello World",
-            "type": "go",
-            "request": "launch",
-            "mode": "debug",
-            "program": "${workspaceFolder}/lesson"
-        },
-        {
-            "name": "Run Current File",
-            "type": "go",
-            "request": "launch",
-            "mode": "debug",
-            "program": "${file}"
-        },
-        {
-            "name": "Build All",
-            "type": "go",
-            "request": "launch",
-            "mode": "debug",
-            "program": "${workspaceFolder}"
-        },
-        {
-            "name": "Run MR Sequential",
+            "name": "Run MR Sequential (Word Count)",
             "type": "go",
             "request": "launch",
             "mode": "debug",
             "program": "${workspaceFolder}/src/main/mrsequential.go",
             "args": [
-                "${workspaceFolder}/src/main/pg-being_ernest.txt",
-                "${workspaceFolder}/src/main/pg-dorian_gray.txt"
-            ]
+                "${workspaceFolder}/src/mrapps/wc.so",
+                "${workspaceFolder}/src/main/pg-being_ernest.txt"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
         },
         {
-            "name": "MapReduce Master",
+            "name": "Run MR Sequential (Indexer)",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrsequential.go",
+            "args": [
+                "${workspaceFolder}/src/mrapps/indexer.so",
+                "${workspaceFolder}/src/main/pg-being_ernest.txt"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
+        },
+        {
+            "name": "MapReduce Master (All Files)",
             "type": "go",
             "request": "launch",
             "mode": "debug",
@@ -42,11 +42,36 @@
             "args": [
                 "${workspaceFolder}/src/main/pg-being_ernest.txt",
                 "${workspaceFolder}/src/main/pg-dorian_gray.txt",
-                "${workspaceFolder}/src/main/pg-frankenstein.txt"
-            ]
+                "${workspaceFolder}/src/main/pg-frankenstein.txt",
+                "${workspaceFolder}/src/main/pg-grimm.txt",
+                "${workspaceFolder}/src/main/pg-huckleberry_finn.txt",
+                "${workspaceFolder}/src/main/pg-metamorphosis.txt",
+                "${workspaceFolder}/src/main/pg-sherlock_holmes.txt",
+                "${workspaceFolder}/src/main/pg-tom_sawyer.txt"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
         },
         {
-            "name": "MapReduce Worker (wc)",
+            "name": "MapReduce Master (Single File)",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrmaster.go",
+            "args": [
+                "${workspaceFolder}/src/main/pg-being_ernest.txt"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
+        },
+        {
+            "name": "MapReduce Worker (Word Count)",
             "type": "go",
             "request": "launch",
             "mode": "debug",
@@ -54,10 +79,15 @@
             "preLaunchTask": "Build wc.so",
             "args": [
                 "${workspaceFolder}/src/mrapps/wc.so"
-            ]
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
         },
         {
-            "name": "MapReduce Worker (indexer)",
+            "name": "MapReduce Worker (Indexer)",
             "type": "go",
             "request": "launch",
             "mode": "debug",
@@ -65,43 +95,85 @@
             "preLaunchTask": "Build indexer.so",
             "args": [
                 "${workspaceFolder}/src/mrapps/indexer.so"
-            ]
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
         },
         {
-            "name": "Run Raft Tests (single file)",
+            "name": "Debug Master with Race Detector",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrmaster.go",
+            "args": [
+                "${workspaceFolder}/src/main/pg-being_ernest.txt"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main",
+            "buildFlags": "-race"
+        },
+        {
+            "name": "Debug Worker with Race Detector",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/src/main/mrworker.go",
+            "preLaunchTask": "Build wc.so",
+            "args": [
+                "${workspaceFolder}/src/mrapps/wc.so"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main",
+            "buildFlags": "-race"
+        },
+        {
+            "name": "Run Lab1 Tests",
             "type": "go",
             "request": "launch",
             "mode": "test",
-            "program": "${workspaceFolder}/src/raft",
-            "args": ["-test.run", "TestInitialElection"]
+            "program": "${workspaceFolder}/src/main",
+            "args": [
+                "-v"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
         },
         {
-            "name": "Run All Raft Tests",
+            "name": "Run Test Script",
             "type": "go",
             "request": "launch",
-            "mode": "test",
-            "program": "${workspaceFolder}/src/raft"
+            "mode": "exec",
+            "program": "${workspaceFolder}/src/main/test-mr.sh",
+            "console": "integratedTerminal",
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${workspaceFolder}/src/main"
         },
         {
-            "name": "Run KV Tests",
+            "name": "Debug Current File",
             "type": "go",
             "request": "launch",
-            "mode": "test",
-            "program": "${workspaceFolder}/src/kvraft"
-        },
-        {
-            "name": "Run ShardMaster Tests",
-            "type": "go",
-            "request": "launch",
-            "mode": "test",
-            "program": "${workspaceFolder}/src/shardmaster"
-        },
-        {
-            "name": "Run ShardKV Tests",
-            "type": "go",
-            "request": "launch",
-            "mode": "test",
-            "program": "${workspaceFolder}/src/shardkv"
+            "mode": "debug",
+            "program": "${file}",
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux"
+            },
+            "cwd": "${fileDirname}"
         }
     ]
 }

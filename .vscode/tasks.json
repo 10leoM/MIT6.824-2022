@@ -5,7 +5,7 @@
       "label": "Build wc.so",
       "type": "shell",
       "command": "bash",
-      "args": ["-lc", "go build -buildmode=plugin -o src/mrapps/wc.so src/mrapps/wc.go"],
+      "args": ["-lc", "cd src/mrapps && GO111MODULE=off go build -buildmode=plugin -o wc.so wc.go"],
       "group": "build",
       "problemMatcher": ["$go"],
       "detail": "Build word count plugin"
@@ -14,7 +14,7 @@
       "label": "Build indexer.so",
       "type": "shell",
       "command": "bash",
-      "args": ["-lc", "go build -buildmode=plugin -o src/mrapps/indexer.so src/mrapps/indexer.go"],
+      "args": ["-lc", "cd src/mrapps && GO111MODULE=off go build -buildmode=plugin -o indexer.so indexer.go"],
       "group": "build",
       "problemMatcher": ["$go"],
       "detail": "Build indexer plugin"
@@ -23,10 +23,68 @@
       "label": "Build all plugins",
       "type": "shell",
       "command": "bash",
-      "args": ["-lc", "go build -buildmode=plugin -o src/mrapps/wc.so src/mrapps/wc.go && go build -buildmode=plugin -o src/mrapps/indexer.so src/mrapps/indexer.go"],
+      "args": ["-lc", "cd src/mrapps && GO111MODULE=off go build -buildmode=plugin -o wc.so wc.go && GO111MODULE=off go build -buildmode=plugin -o indexer.so indexer.go"],
       "group": "build",
       "problemMatcher": ["$go"],
       "detail": "Build both wc and indexer plugins"
+    },
+    {
+      "label": "Build Master",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd src/main && GO111MODULE=off go build -o mrmaster mrmaster.go"],
+      "group": "build",
+      "problemMatcher": ["$go"],
+      "detail": "Build MapReduce Master"
+    },
+    {
+      "label": "Build Worker",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd src/main && GO111MODULE=off go build -o mrworker mrworker.go"],
+      "group": "build",
+      "problemMatcher": ["$go"],
+      "detail": "Build MapReduce Worker"
+    },
+    {
+      "label": "Build Sequential",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd src/main && GO111MODULE=off go build -o mrsequential mrsequential.go"],
+      "group": "build",
+      "problemMatcher": ["$go"],
+      "detail": "Build Sequential MapReduce"
+    },
+    {
+      "label": "Build All Lab1",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd src/main && GO111MODULE=off go build -o mrmaster mrmaster.go && GO111MODULE=off go build -o mrworker mrworker.go && GO111MODULE=off go build -o mrsequential mrsequential.go && cd ../mrapps && GO111MODULE=off go build -buildmode=plugin -o wc.so wc.go && GO111MODULE=off go build -buildmode=plugin -o indexer.so indexer.go"],
+      "group": "build",
+      "problemMatcher": ["$go"],
+      "detail": "Build all Lab1 components"
+    },
+    {
+      "label": "Clean Build",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "rm -f src/main/mrmaster src/main/mrworker src/main/mrsequential src/mrapps/*.so"],
+      "group": "build",
+      "detail": "Clean all build artifacts"
+    },
+    {
+      "label": "Run Test Script",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd src/main && GO111MODULE=off ./test-mr.sh"],
+      "group": "test",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "detail": "Run the full test suite"
     }
   ]
 }

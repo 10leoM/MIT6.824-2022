@@ -22,33 +22,27 @@ const ( // Master 当前任务阶段
 	AllDone            //	所有任务完成
 )
 
-const ( // 任务类型
-	NoTask         = iota // 无任务
-	MapTaskType           // map 任务
-	ReduceTaskType        // reduce 任务
-)
+// type MapTask struct {
+// 	fileName  string // 输入文件名
+// 	mapTaskId int    // map 任务 ID
+// 	status    int    // 任务状态：未分配、进行中、已完成
+// 	startTime int64  // 任务开始时间
+// }
 
-type RequestArgs struct { // Worker请求任务的参数
-	WorkerId int // worker ID
-}
+// type ReduceTask struct {
+// 	fileNames    []string // 中间文件列表
+// 	reduceTaskId int      // reduce 任务 ID
+// 	status       int      // 任务状态：未分配、进行中、已完成
+// 	startTime    int64    // 任务开始时间
+// }
 
-type RequestReply struct { // Worker请求任务的回复
-	TaskType int // 任务类型
-	TaskId   int // 任务 ID
-}
-
-type MapTask struct {
-	fileName  string // 输入文件名
-	mapTaskId int    // map 任务 ID
-	status    int    // 任务状态：未分配、进行中、已完成
-	startTime int64  // 任务开始时间
-}
-
-type ReduceTask struct {
-	fileNames    []string // 中间文件列表
-	reduceTaskId int      // reduce 任务 ID
-	status       int      // 任务状态：未分配、进行中、已完成
-	startTime    int64    // 任务开始时间
+type Task struct { // 通用任务结构体
+	TaskType   int      // 任务类型：map、reduce、无任务
+	TaskStatus int      // 任务状态：未分配、进行中、已完成
+	TaskId     int      // 任务 ID
+	FileName   string   // 输入文件名（map 任务）
+	FileNames  []string // 中间文件列表（reduce 任务）
+	NReduce    int      // reduce 任务数量（map 任务）
 }
 
 type Master struct { // 主节点结构体
@@ -58,22 +52,21 @@ type Master struct { // 主节点结构体
 	mtx   sync.Mutex // 互斥锁，保护
 
 	// map 任务相关
-	mapTasks      []MapTask // map 任务列表
-	nMap          int       // map 任务总数
-	ncompletedMap int       // 已完成的 map 任务数量
+	mapTasks      []Task // map 任务列表
+	nMap          int    // map 任务总数
+	ncompletedMap int    // 已完成的 map 任务数量
 
 	// reduce 任务相关
-	reduceTasks      []ReduceTask // reduce 任务列表
-	nReduce          int          // reduce 任务总数
-	ncompletedReduce int          // 已完成的 reduce 任务数量
+	reduceTasks      []Task // reduce 任务列表
+	nReduce          int    // reduce 任务总数
+	ncompletedReduce int    // 已完成的 reduce 任务数量
 
 	// 任务调度相关
-
 }
 
 // Your code here -- RPC handlers for the worker to call.
 // 处理来自 worker 的任务请求
-func (m *Master) RequestTask(args *RequestArgs, reply *RequestReply) {
+func (m *Master) AssignTask(args *RequestArgs, reply *RequestReply) error {
 	// 互斥锁保护
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -82,30 +75,45 @@ func (m *Master) RequestTask(args *RequestArgs, reply *RequestReply) {
 	switch m.phase {
 	case MapPhase: // 分配 map 任务
 		for i, task := range m.mapTasks {
-			if task.status == Idle {
+			if task.TaskType == MapTaskType && task.TaskStatus == Idle {
 				// 分配该任务
-
+				m.mapTasks[i].TaskStatus = InProgress
+				reply.TaskType = MapTaskType
+				reply.TaskId = task.TaskId
+				reply.FileName = task.FileName
+				reply.NReduce = m.nReduce
+				return nil
 			}
-		}
-		if m.ncompletedMap == nMap {
-			// 切换到 reduce 阶段
-			m.phase = ReducePhase
 		}
 	case ReducePhase: // 分配 reduce 任务
 		for i, task := range m.reduceTasks {
-			if task.status == Idle {
-
+			if task.TaskType == ReduceTaskType && task.TaskStatus == Idle {
+				// 分配该任务
+				m.reduceTasks[i].TaskStatus = InProgress
+				reply.TaskType = ReduceTaskType
+				reply.TaskId = task.TaskId
+				reply.FileNames = append([]string{}, task.FileNames...) // 复制切片
+				return nil
 			}
 		}
 	case AllDone: // 所有任务完成
+		// fmt.Println("All tasks completed. No more tasks to assign.")
 		reply.TaskType = NoTask
-		return
 	default:
-		log.Fatalf("Unknown phase %v", m.phase)
+		// log.Fatalf("Unknown phase %v", m.phase)
 	}
+
+	// 无任务可分配
+	reply.TaskType = NoTask
+	reply.TaskId = -1
+	reply.FileNames = nil
+	reply.FileName = ""
+	reply.NReduce = 0
+	return nil
 }
 
-func (m *Master) ReportTaskDone(args *ReportTaskArgs, reply *ReportTaskReply) {
+// Worker汇报任务完成情况，Master更新任务状态
+func (m *Master) ReportTaskDone(args *ReportArgs, reply *ReportReply) error {
 	// 互斥锁保护
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
@@ -113,8 +121,8 @@ func (m *Master) ReportTaskDone(args *ReportTaskArgs, reply *ReportTaskReply) {
 	// 根据任务类型更新任务状态
 	switch args.TaskType {
 	case MapTaskType:
-		if m.mapTasks[args.TaskId].status != Completed {
-			m.mapTasks[args.TaskId].status = Completed
+		if m.mapTasks[args.TaskId].TaskStatus != Completed {
+			m.mapTasks[args.TaskId].TaskStatus = Completed
 			m.ncompletedMap++
 			if m.ncompletedMap == m.nMap {
 				// 切换到 reduce 阶段
@@ -122,8 +130,8 @@ func (m *Master) ReportTaskDone(args *ReportTaskArgs, reply *ReportTaskReply) {
 			}
 		}
 	case ReduceTaskType:
-		if m.reduceTasks[args.TaskId].status != Completed {
-			m.reduceTasks[args.TaskId].status = Completed
+		if m.reduceTasks[args.TaskId].TaskStatus != Completed {
+			m.reduceTasks[args.TaskId].TaskStatus = Completed
 			m.ncompletedReduce++
 			if m.ncompletedReduce == m.nReduce {
 				// 切换到 AllDone 阶段
@@ -131,8 +139,9 @@ func (m *Master) ReportTaskDone(args *ReportTaskArgs, reply *ReportTaskReply) {
 			}
 		}
 	default:
-		log.Fatalf("Unknown task type %v", args.TaskType)
+		// log.Fatalf("Unknown task type %v", args.TaskType)
 	}
+	return nil
 }
 
 // an example RPC handler.
@@ -161,44 +170,48 @@ func (m *Master) server() {
 // main/mrmaster.go calls Done() periodically to find out
 // if the entire job has finished.
 func (m *Master) Done() bool {
-	// ret := false
-	ret := true // 假设所有任务都完成了，立即返回
+	ret := false
 	// Your code here.
-
+	if m.phase == AllDone {
+		ret = true
+	}
 	return ret
 }
 
 // MapTask创建函数，私有
-func newMapTasks(fileNames []string) []MapTask {
+func newMapTasks(fileNames []string) []Task {
 	fmt.Println("Creating", len(fileNames), "map tasks.")
-	tasks := make([]MapTask, len(fileNames))
+	tasks := make([]Task, len(fileNames))
 	for i, file := range fileNames {
-		tasks[i] = MapTask{
-			fileName:  file,
-			mapTaskId: i,
-			status:    Idle,
-			startTime: 0,
+		tasks[i] = Task{
+			TaskType:   MapTaskType,
+			TaskStatus: Idle,
+			TaskId:     i,
+			FileName:   file,
+			NReduce:    0,
 		}
 	}
 	return tasks
 }
 
 // ReduceTask创建函数，私有
-func newReduceTasks(nMap, nReduce int) []ReduceTask {
+func newReduceTasks(nMap, nReduce int) []Task {
 	fmt.Println("Creating", nReduce, "reduce tasks.")
-	tasks := make([]ReduceTask, nReduce)
+	tasks := make([]Task, nReduce)
 	for i := 0; i < nReduce; i++ {
 		files := make([]string, 0)
 		for j := 0; j < nMap; j++ {
 			files = append(files, fmt.Sprintf("mr-%d-%d", j, i)) // 中间文件名为mr-X-Y，其中 X 是 map 任务 ID，Y 是 reduce 任务 ID
 		}
-		tasks[i] = ReduceTask{
-			fileNames:    files,
-			reduceTaskId: i,
-			status:       Idle,
-			startTime:    0,
+		tasks[i] = Task{
+			TaskType:   ReduceTaskType,
+			TaskStatus: Idle,
+			TaskId:     i,
+			FileNames:  files,
+			NReduce:    nReduce,
 		}
 	}
+	return tasks
 }
 
 // create a Master.

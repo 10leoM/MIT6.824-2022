@@ -1,14 +1,43 @@
 {
-    "go.gopath": "/home/citizen/go",
-    "go.goroot": "/usr/local/go",
+    "go.toolsManagement.autoUpdate": true,
     "go.useLanguageServer": true,
-    "go.lintTool": "golint",
+    "go.lintTool": "golangci-lint",
     "go.lintOnSave": "package",
     "go.vetOnSave": "package",
     "go.buildFlags": [],
-    "go.testFlags": [],
+    "go.lintFlags": [],
+    "go.vetFlags": [],
     "go.coverOnSave": false,
     "go.useCodeSnippetsOnFunctionSuggest": true,
     "go.formatTool": "gofmt",
-    "go.docsTool": "gogetdoc"
+    "go.formatFlags": [],
+    "go.docsTool": "gogetdoc",
+    "go.inferGopath": true,
+    "go.gocodePackageLookupMode": "go",
+    "go.gotoSymbol.includeImports": true,
+    "go.gocodeAutoBuild": false,
+    "files.exclude": {
+        "**/mrmaster": true,
+        "**/mrworker": true,
+        "**/mrsequential": true,
+        "**/*.so": true,
+        "**/mr-tmp": true
+    },
+    "search.exclude": {
+        "**/mrmaster": true,
+        "**/mrworker": true,
+        "**/mrsequential": true,
+        "**/*.so": true,
+        "**/mr-tmp": true
+    },
+    "go.testTimeout": "30s",
+    "go.testEnvVars": {
+        "GO111MODULE": "off",
+        "GOOS": "linux"
+    },
+    "debug.onTaskErrors": "showErrors",
+    "terminal.integrated.env.linux": {
+        "GO111MODULE": "off",
+        "GOOS": "linux"
+    }
 }
