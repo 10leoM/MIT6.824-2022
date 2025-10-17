@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 const ( // 任务状态：未分配、进行中、已完成
@@ -37,12 +38,13 @@ const ( // Master 当前任务阶段
 // }
 
 type Task struct { // 通用任务结构体
-	TaskType   int      // 任务类型：map、reduce、无任务
-	TaskStatus int      // 任务状态：未分配、进行中、已完成
-	TaskId     int      // 任务 ID
-	FileName   string   // 输入文件名（map 任务）
-	FileNames  []string // 中间文件列表（reduce 任务）
-	NReduce    int      // reduce 任务数量（map 任务）
+	TaskType   int       // 任务类型：map、reduce、无任务
+	TaskStatus int       // 任务状态：未分配、进行中、已完成
+	TaskId     int       // 任务 ID
+	FileName   string    // 输入文件名（map 任务）
+	FileNames  []string  // 中间文件列表（reduce 任务）
+	NReduce    int       // reduce 任务数量（map 任务）
+	StartTime  time.Time // 任务开始时间
 }
 
 type Master struct { // 主节点结构体
@@ -78,6 +80,7 @@ func (m *Master) AssignTask(args *RequestArgs, reply *RequestReply) error {
 			if task.TaskType == MapTaskType && task.TaskStatus == Idle {
 				// 分配该任务
 				m.mapTasks[i].TaskStatus = InProgress
+				m.mapTasks[i].StartTime = time.Now()
 				reply.TaskType = MapTaskType
 				reply.TaskId = task.TaskId
 				reply.FileName = task.FileName
@@ -90,6 +93,7 @@ func (m *Master) AssignTask(args *RequestArgs, reply *RequestReply) error {
 			if task.TaskType == ReduceTaskType && task.TaskStatus == Idle {
 				// 分配该任务
 				m.reduceTasks[i].TaskStatus = InProgress
+				m.reduceTasks[i].StartTime = time.Now()
 				reply.TaskType = ReduceTaskType
 				reply.TaskId = task.TaskId
 				reply.FileNames = append([]string{}, task.FileNames...) // 复制切片
@@ -142,6 +146,35 @@ func (m *Master) ReportTaskDone(args *ReportArgs, reply *ReportReply) error {
 		// log.Fatalf("Unknown task type %v", args.TaskType)
 	}
 	return nil
+}
+
+// 启动协程处理任务超时
+func (m *Master) handleCrash() {
+	for {
+		time.Sleep(3 * time.Second) // 每隔3秒检查一次
+		m.mtx.Lock()
+
+		// 检查 map 任务是否超时
+		if m.phase == MapPhase {
+			for i, _ := range m.mapTasks {
+				if timeDiff := time.Since(m.mapTasks[i].StartTime); timeDiff >= 10*time.Second && m.mapTasks[i].TaskStatus == InProgress {
+					// 任务超时，重新分配
+					m.mapTasks[i].TaskStatus = Idle
+				}
+			}
+		} else if m.phase == ReducePhase {
+			for i, _ := range m.reduceTasks {
+				if timeDiff := time.Since(m.reduceTasks[i].StartTime); timeDiff >= 10*time.Second && m.reduceTasks[i].TaskStatus == InProgress {
+					// 任务超时，重新分配
+					m.reduceTasks[i].TaskStatus = Idle
+				}
+			}
+		} else {
+			m.mtx.Unlock()
+			break // AllDone 阶段，退出协程
+		}
+		m.mtx.Unlock()
+	}
 }
 
 // an example RPC handler.
@@ -234,5 +267,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	fmt.Println("Master created with", m.nMap, "map tasks and", m.nReduce, "reduce tasks.")
 
 	m.server() // 启动 RPC 服务器
+
+	go m.handleCrash() // 启动任务超时处理协程
+
 	return &m
 }

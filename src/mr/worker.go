@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net/rpc"
 	"os"
@@ -130,7 +131,7 @@ func handleMapTask(reply *RequestReply, mapf func(string, string) []KeyValue) er
 	// 4) 将 Map 输出写入对应分区的临时文件（逐条 JSON）
 	for _, kv := range kva {
 		r := ihash(kv.Key) % nReduce
-		if err := encoders[r].Encode(&kv); err != nil {
+		if err := encoders[r].Encode(&kv); err != nil { // 形如{"Key": "a", "Value": 1} {"Key": "b", "Value": 1}的格式
 			// 写失败：关闭并清理所有临时文件
 			for i := 0; i < nReduce; i++ {
 				if tmpFiles[i] != nil {
@@ -169,9 +170,12 @@ func handleReduceTask(reply *RequestReply, reducef func(string, []string) string
 		}
 
 		decoder := json.NewDecoder(file) // 创建 JSON 解码器
-		for decoder.More() {
+		for {
 			var kv KeyValue
-			err := decoder.Decode(&kv)
+			err := decoder.Decode(&kv) // 逐条解码 JSON 数据
+			if err == io.EOF {
+				break
+			}
 			if err != nil {
 				log.Fatalf("cannot decode key-value pair from JSON")
 			}
@@ -185,28 +189,33 @@ func handleReduceTask(reply *RequestReply, reducef func(string, []string) string
 		return intermediate[i].Key < intermediate[j].Key
 	})
 
-	// 创建输出文件
-	outputname := fmt.Sprintf("mr-out-%d", reply.TaskId)
-	outputfile, err := os.Create(outputname)
+	// 创建临时输出文件
+	outFinal := fmt.Sprintf("mr-out-%d", reply.TaskId)
+	outTmp, err := os.CreateTemp(".", fmt.Sprintf("mr-out-%d-*.tmp", reply.TaskId))
 	if err != nil {
-		log.Fatalf("cannot create %v", outputname)
+		return fmt.Errorf("create tmp for %s: %w", outFinal, err)
 	}
-	defer outputfile.Close()
-
-	// 遍历排序后的中间数据，调用 Reduce 函数并写入输出文件
+	// 依次处理每个 key 相同的键值对集合
 	for i := 0; i < len(intermediate); {
-		start := i
-		for i < len(intermediate) && intermediate[i].Key == intermediate[start].Key {
-			i++
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
 		}
-		values := make([]string, 0, i-start)
-		for j := start; j < i; j++ {
-			values = append(values, intermediate[j].Value)
+		vals := make([]string, 0, j-i)
+		for k := i; k < j; k++ {
+			vals = append(vals, intermediate[k].Value)
 		}
-		output := reducef(intermediate[start].Key, values)
-
-		// 写入输出文件
-		fmt.Fprintf(outputfile, "%v %v\n", intermediate[start].Key, output)
+		fmt.Fprintf(outTmp, "%v %v\n", intermediate[i].Key, reducef(intermediate[i].Key, vals))
+		i = j
+	}
+	// 关闭并原子改名到最终文件 mr-ReduceID
+	if err := outTmp.Close(); err != nil {
+		os.Remove(outTmp.Name())
+		return fmt.Errorf("close tmp for %s: %w", outFinal, err)
+	}
+	if err := os.Rename(outTmp.Name(), outFinal); err != nil {
+		os.Remove(outTmp.Name())
+		return fmt.Errorf("rename %s -> %s: %w", outTmp.Name(), outFinal, err)
 	}
 	return nil
 }
