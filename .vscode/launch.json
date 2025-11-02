@@ -151,6 +151,44 @@
             "cwd": "${workspaceFolder}/src/main"
         },
         {
+            "name": "Debug Raft Lab2 (2A) - Exec Mode",
+            "type": "go",
+            "request": "launch",
+            "mode": "exec",
+            "program": "/usr/bin/go",
+            "args": [
+                "test",
+                "-run",
+                "2A",
+                "-v"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux",
+                "GOPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}/src/raft",
+            "buildFlags": "-gcflags=\"all=-N -l\""
+        },
+        {
+            "name": "Debug Raft Lab2 (2A, race)",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}/src/raft",
+            "args": [
+                "-test.run",
+                "2A"
+            ],
+            "env": {
+                "GO111MODULE": "off",
+                "GOOS": "linux",
+                "GOPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}/src/raft",
+            "buildFlags": "-race -gcflags=\"all=-N -l\""
+        },
+        {
             "name": "Run Test Script",
             "type": "go",
             "request": "launch",

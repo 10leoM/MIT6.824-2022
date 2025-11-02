@@ -85,6 +85,34 @@
         "panel": "shared"
       },
       "detail": "Run the full test suite"
+    },
+    {
+      "label": "Go Test Raft Lab2 2A",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd src/raft && GO111MODULE=off go test -run 2A -count=1 -timeout 120s -v"],
+      "group": "test",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "detail": "Run Raft Lab2A tests"
+    },
+    {
+      "label": "Go Test Raft Lab2 2A (race)",
+      "type": "shell",
+      "command": "bash",
+      "args": ["-lc", "cd src/raft && GO111MODULE=off go test -run 2A -count=1 -timeout 120s -race -v"],
+      "group": "test",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "shared"
+      },
+      "detail": "Run Raft Lab2A tests with race detector"
     }
   ]
 }
