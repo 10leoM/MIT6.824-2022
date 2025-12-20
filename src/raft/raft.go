@@ -76,6 +76,19 @@ type AppendEntriesReply struct {
 	Success bool // 是否成功追加日志条目
 }
 
+// RequestVoteArgs 定义 RequestVote RPC 的参数结构
+type RequestVoteArgs struct {
+	Term         int // 候选人的任期号
+	CandidateId  int // 候选人的 ID
+	LastLogIndex int // 候选人最后一个日志条目的索引
+	LastLogTerm  int // 候选人最后一个日志条目的任期号
+}
+
+type RequestVoteReply struct {
+	Term        int  // 投票者的当前任期号
+	VoteGranted bool // 是否投票给候选人
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // 用于保护共享访问的互斥锁
@@ -112,6 +125,46 @@ type Raft struct {
 	// 通道用于处理选举和心跳
 	voteCh      chan struct{} // 用于接收投票结果的通道，Follower代表发送投票，Candidate代表收到投票
 	heartbeatCh chan struct{} // 用于接收心跳信号的通道
+}
+
+// 创建一个新的 Raft 服务器实例
+func Make(peers []*labrpc.ClientEnd, me int,
+	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	rf := &Raft{}
+	rf.peers = peers
+	rf.persister = persister
+	rf.me = me
+
+	// Your initialization code here (2A, 2B, 2C).
+	// 初始化 Raft 服务器的状态
+	rf.currentTerm = 0           // 初始任期号为 0
+	rf.votedFor = -1             // -1 表示尚未投票
+	rf.log = make([]LogEntry, 1) // 索引 0 保留为空
+	rf.state = Follower          // 初始状态为跟随者
+	rf.applyCh = applyCh         // 应用日志条目的通道
+	rf.commitIndex = 0           // 初始提交索引为 0
+	rf.lastApplied = 0           // 初始已应用索引为 0
+
+	// 领导者特有的状态初始化
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
+	// 初始化选举定时器相关状态
+	rf.voteCh = make(chan struct{}, 1)
+	rf.heartbeatCh = make(chan struct{}, 1)
+
+	// 设置随机选举超时时间
+	timeout := 400 + rand.Intn(200)
+	rf.randElectionTimer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
+	rf.resetElectionTimer()
+
+	// 启动后台 goroutine 处理选举和心跳
+	go rf.handleTimeout()
+
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
+	return rf
 }
 
 // return currentTerm and whether this server
@@ -164,18 +217,7 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-// RequestVoteArgs 定义 RequestVote RPC 的参数结构
-type RequestVoteArgs struct {
-	Term         int // 候选人的任期号
-	CandidateId  int // 候选人的 ID
-	LastLogIndex int // 候选人最后一个日志条目的索引
-	LastLogTerm  int // 候选人最后一个日志条目的任期号
-}
-
-type RequestVoteReply struct {
-	Term        int  // 投票者的当前任期号
-	VoteGranted bool // 是否投票给候选人
-}
+// ============================ Helper函数 =========================================================
 
 // 获取日志的最后一个条目的索引和任期号
 func (rf *Raft) lastLogInfo() (int, int) {
@@ -197,6 +239,45 @@ func (rf *Raft) BecomeFollower(term int) {
 	}
 	rf.resetElectionTimer()
 }
+
+// 重置选举定时器，用于 Follower 和 Candidate 状态
+func (rf *Raft) resetElectionTimer() {
+	// 停止和清空定时器，否则会导致定时器过期后立即触发
+	if !rf.randElectionTimer.Stop() {
+		select {
+		case <-rf.randElectionTimer.C:
+		default:
+		}
+	}
+
+	// 400 到 600 毫秒的随机超时时间
+	rf.randElectionTimer.Reset(time.Duration(400+rand.Intn(200)) * time.Millisecond)
+	rf.lastHeard = time.Now()
+}
+
+// 超时，转换为Candidate状态
+func (rf *Raft) Convert2Candidate() {
+	rf.state = Candidate
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.resetElectionTimer()
+}
+
+// 调用 Kill() 方法后，Raft 服务器应该立即停止所有 goroutine
+// 避免内存泄漏和 CPU 占用问题
+// 标记 Raft 服务器为已死亡
+func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
+	// Your code here, if desired.
+}
+
+// 检查 Raft 服务器是否已被杀死
+func (rf *Raft) killed() bool {
+	z := atomic.LoadInt32(&rf.dead)
+	return z == 1
+}
+
+// ============================ RPC处理函数 =========================================================
 
 // example RequestVote RPC handler.
 // 处理 RequestVote RPC 请求
@@ -250,155 +331,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 2B: 实现任期更新和日志一致性检查
 }
 
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
 // 发送 RequestVote RPC 请求到指定服务器
 // 返回值：是否成功发送 RPC 请求
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
-}
-
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-// 启动对新日志条目的共识过程
-// 返回值：日志条目的索引、当前任期、是否为领导者
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-
-	return index, term, isLeader
-}
-
-// the tester doesn't halt goroutines created by Raft after each test,
-// but it does call the Kill() method. your code can use killed() to
-// check whether Kill() has been called. the use of atomic avoids the
-// need for a lock.
-// 调用 Kill() 方法后，Raft 服务器应该立即停止所有 goroutine
-// 避免内存泄漏和 CPU 占用问题
-// the issue is that long-running goroutines use memory and may chew
-// up CPU time, perhaps causing later tests to fail and generating
-// confusing debug output. any goroutine with a long-running loop
-// should call killed() to check whether it should stop.
-// 标记 Raft 服务器为已死亡
-func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
-}
-
-// 检查 Raft 服务器是否已被杀死
-func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
-}
-
-// the service or tester wants to create a Raft server. the ports
-// of all the Raft servers (including this one) are in peers[]. this
-// server's port is peers[me]. all the servers' peers[] arrays
-// have the same order. persister is a place for this server to
-// save its persistent state, and also initially holds the most
-// recent saved state, if any. applyCh is a channel on which the
-// tester or service expects Raft to send ApplyMsg messages.
-// Make() must return quickly, so it should start goroutines
-// for any long-running work.
-// 创建一个新的 Raft 服务器实例
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
-	// Your initialization code here (2A, 2B, 2C).
-	// 初始化 Raft 服务器的状态
-	rf.currentTerm = 0           // 初始任期号为 0
-	rf.votedFor = -1             // -1 表示尚未投票
-	rf.log = make([]LogEntry, 1) // 索引 0 保留为空
-	rf.state = Follower          // 初始状态为跟随者
-	rf.applyCh = applyCh         // 应用日志条目的通道
-	rf.commitIndex = 0           // 初始提交索引为 0
-	rf.lastApplied = 0           // 初始已应用索引为 0
-
-	// 领导者特有的状态初始化
-	rf.nextIndex = make([]int, len(rf.peers))
-	rf.matchIndex = make([]int, len(rf.peers))
-
-	// 初始化选举定时器相关状态
-	rf.voteCh = make(chan struct{}, 1)
-	rf.heartbeatCh = make(chan struct{}, 1)
-
-	// 设置随机选举超时时间
-	timeout := 400 + rand.Intn(200)
-	rf.randElectionTimer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
-	rf.resetElectionTimer()
-
-	// 启动后台 goroutine 处理选举和心跳
-	go rf.handleTimeout()
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
-	return rf
-}
-
-// 设置随机选举超时时间
-func (rf *Raft) resetElectionTimer() {
-	// 停止和清空定时器
-	if !rf.randElectionTimer.Stop() {
-		select {
-		case <-rf.randElectionTimer.C:
-		default:
-		}
-	}
-
-	// 400 到 600 毫秒的随机超时时间
-	rf.randElectionTimer.Reset(time.Duration(400+rand.Intn(200)) * time.Millisecond)
-	rf.lastHeard = time.Now()
-}
-
-func (rf *Raft) Convert2Candidate() {
-	rf.state = Candidate
-	rf.currentTerm++
-	rf.votedFor = rf.me
-	rf.resetElectionTimer()
 }
 
 // 运行 Raft 节点的主循环, 处理超时
@@ -411,7 +348,7 @@ Leader：周期性（~100ms）向所有节点发送空 AppendEntries 心跳以�
 	    同时更新 nextIndex/matchIndex，若发现更高 term 的 RPC 返回则退回 Follower。
 */
 func (rf *Raft) handleTimeout() {
-	DPrintf("Raft %d: start handleTimeout goroutine", rf.me)
+	DPrintf(1, "Raft %d: start handleTimeout goroutine", rf.me)
 	for !rf.killed() {
 		select {
 		case <-rf.randElectionTimer.C:
@@ -422,7 +359,6 @@ func (rf *Raft) handleTimeout() {
 				rf.mu.Unlock()
 				go rf.startElection()
 			case Leader:
-				rf.resetElectionTimer()
 				rf.mu.Unlock()
 			}
 		}
@@ -449,7 +385,7 @@ func (rf *Raft) startElection() {
 	}
 
 	// 准备 RequestVote RPC 参数
-	DPrintf("Raft %d: start election for term %d", rf.me, rf.currentTerm)
+	DPrintf(1, "Raft %d: start election for term %d", rf.me, rf.currentTerm)
 
 	lastIndex, lastTerm := rf.lastLogInfo()
 	term := rf.currentTerm
@@ -477,20 +413,20 @@ func (rf *Raft) startElection() {
 				defer rf.mu.Unlock()
 				if reply.Term > term {
 					// 发现更高任期，转为 Follower
-					DPrintf("[startElection fail] Raft %d: discovers higher term %d from server %d, becomes Follower", candidateId, reply.Term, server)
+					DPrintf(1, "[startElection fail] Raft %d: discovers higher term %d from server %d, becomes Follower", candidateId, reply.Term, server)
 					rf.BecomeFollower(reply.Term)
 					return
 				}
 
 				// 仍然是 Candidate 状态，处理投票结果
 				if rf.state != Candidate {
-					DPrintf("[startElection fail]Raft %d: no longer Candidate, ignore vote from server %d", candidateId, server)
+					DPrintf(1, "[startElection fail]Raft %d: no longer Candidate, ignore vote from server %d", candidateId, server)
 					return
 				}
 
 				if reply.VoteGranted && reply.Term == term {
 					muVotes.Lock()
-					DPrintf("Raft %d: receive vote from server %d, term %d", candidateId, server, reply.Term)
+					DPrintf(1, "Raft %d: receive vote from server %d, term %d", candidateId, server, reply.Term)
 					votes++
 					muVotes.Unlock()
 					if votes > len(rf.peers)/2 {
@@ -500,7 +436,7 @@ func (rf *Raft) startElection() {
 							rf.nextIndex[idx] = len(rf.log)
 							rf.matchIndex[idx] = 0
 						}
-						DPrintf("Raft %d: becomes Leader for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
+						DPrintf(1, "Raft %d: becomes Leader for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
 						go rf.sendHeartbeats()
 					}
 				}
@@ -516,7 +452,7 @@ func (rf *Raft) startElection() {
 	if rf.state != Candidate || rf.currentTerm != term || won {
 		return
 	}
-	DPrintf("Raft %d: election failed for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
+	DPrintf(1, "Raft %d: election failed for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -526,7 +462,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// 检查心跳
-	DPrintf("Raft %d: receive AppendEntries RPC from leader %d, term %d", rf.me, args.LeaderId, args.Term)
+	DPrintf(1, "Raft %d: receive AppendEntries RPC from leader %d, term %d", rf.me, args.LeaderId, args.Term)
 
 	// 心跳处理
 	if args.Term < rf.currentTerm {
@@ -535,11 +471,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	// 更新任期和状态
-	if args.Term >= rf.currentTerm || rf.state != Follower {
-		rf.BecomeFollower(args.Term)
-	}
+	rf.BecomeFollower(args.Term)
 	// 更新日志
-	rf.resetElectionTimer()
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	return
@@ -554,7 +487,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) sendHeartbeats() {
 	// 发送心跳
 	// Your code here (2A, 2B).
-	DPrintf("Raft %d: start sendHeartbeats goroutine", rf.me)
+	DPrintf(1, "Raft %d: start sendHeartbeats goroutine", rf.me)
 
 	for {
 		// 发送心跳逻辑
@@ -591,10 +524,21 @@ func (rf *Raft) sendHeartbeats() {
 					defer rf.mu.Unlock()
 					if reply.Term > term {
 						rf.BecomeFollower(reply.Term)
-						go rf.handleTimeout()
 					}
 				}
 			}(i, args)
 		}
 	}
+}
+
+// 启动对新日志条目的共识过程
+// 返回值：日志条目的索引、当前任期、是否为领导者
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	index := -1
+	term := -1
+	isLeader := true
+
+	// Your code here (2B).
+
+	return index, term, isLeader
 }

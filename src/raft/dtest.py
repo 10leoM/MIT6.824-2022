@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+# 使用方式: python dtest.py --help
+# 示例: python dtest.py -n 100 2A
+# -n：测试次数
+# -p：并行任务数
 
 import itertools
 import math
@@ -33,7 +37,6 @@ from rich.panel import Panel
 from rich.traceback import install
 
 install(show_locals=True)
-
 
 @dataclass
 class StatsMeter:
