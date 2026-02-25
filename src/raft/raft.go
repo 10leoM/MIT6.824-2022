@@ -39,9 +39,9 @@ import (
 // snapshots) on the applyCh; at that point you can add fields to
 // ApplyMsg, but set CommandValid to false for these other uses.
 type ApplyMsg struct {
-	CommandValid bool
-	Command      interface{}
-	CommandIndex int
+	CommandValid bool        // 是否包含有效命令
+	Command      interface{} // 客户端请求的具体命令
+	CommandIndex int         // 该日志条目的索引
 }
 
 // Lab2A
@@ -63,10 +63,12 @@ type LogEntry struct {
 
 // AppendEntriesArgs 定义 AppendEntries RPC 的参数结构
 type AppendEntriesArgs struct {
-	Term         int        // 领导者的任期号
-	LeaderId     int        // 领导者的 ID
-	PrevLogIndex int        // 新日志条目紧随之前的索引
-	PrevLogTerm  int        // 新日志条目紧随之前的任期号
+	Term     int // 领导者的任期号
+	LeaderId int // 领导者的 ID
+	// Follow会检查日志一致性，要求 PrevLogIndex 和 PrevLogTerm 与接收者的日志匹配，不匹配则减小 nextIndex 重试
+	PrevLogIndex int // 新日志条目紧随之前的索引
+	PrevLogTerm  int // 新日志条目紧随之前的任期号
+
 	Entries      []LogEntry // 需要被存储的日志条目（可能为空，代表心跳）
 	LeaderCommit int        // 领导者的已提交日志的索引
 }
@@ -102,8 +104,9 @@ type Raft struct {
 	// state a Raft server must maintain.
 	// 2A: 节点状态机，需要currentTerm, votedFor, state
 
-	state   ManchineState // 节点状态：跟随者、候选人、领导者
-	applyCh chan ApplyMsg // 用于向服务或测试器发送已提交日志条目的通道
+	state     ManchineState // 节点状态：跟随者、候选人、领导者
+	applyCh   chan ApplyMsg // 用于发送已提交日志条目的通道，恢复lastApplied
+	applyCond *sync.Cond    // 用于通知 applier goroutine 有新的日志可以应用了
 
 	// 需要持久化存储的状态
 	currentTerm int        // 当前任期号
@@ -111,6 +114,7 @@ type Raft struct {
 	log         []LogEntry // 日志条目列表
 
 	// 易失性状态
+	// 只要 commitIndex > lastApplied，节点就必须通过 applyCh 将日志中的指令发送给测试框架（状态机），并递增 lastApplied
 	commitIndex int // 已提交的最高日志条目的索引
 	lastApplied int // 已应用到状态机的最高日志条目的索引
 
@@ -147,7 +151,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 领导者特有的状态初始化
 	rf.nextIndex = make([]int, len(rf.peers))
+	for i := range rf.peers {
+		rf.nextIndex[i] = 1
+	}
 	rf.matchIndex = make([]int, len(rf.peers))
+	for i := range rf.peers {
+		rf.matchIndex[i] = 1
+	}
 
 	// 初始化选举定时器相关状态
 	rf.voteCh = make(chan struct{}, 1)
@@ -160,6 +170,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 启动后台 goroutine 处理选举和心跳
 	go rf.handleTimeout()
+
+	// 初始化 applyCond 条件变量
+	rf.applyCond = sync.NewCond(&rf.mu)
+	// 启动 applier goroutine 处理日志应用
+	go rf.applier()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -314,6 +329,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.resetElectionTimer()
+		// 持久化
+		rf.persist()
 		// 通知选举协程收到投票
 		select {
 		case rf.voteCh <- struct{}{}:
@@ -338,6 +355,59 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// Your code here (2A, 2B).
+	// 检查任期号，更新状态，重置选举定时器
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 检查心跳
+	DPrintf('B', "Raft %d: receive AppendEntries RPC from leader %d, term %d, commitIndex %d", rf.me, args.LeaderId, args.Term, args.LeaderCommit)
+
+	// 不合法的 AppendEntries 请求
+	// 1.任期小于自己，拒绝处理
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+	// // 2. 检查日志一致性
+	// if args.PrevLogIndex >= 0 && args.PrevLogIndex < len(rf.log) {
+	// 	// 检查日志一致性
+	// 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	// 		reply.Term = rf.currentTerm
+	// 		reply.Success = false
+	// 		return
+	// 	}
+	// } else {
+	// 	// PrevLogIndex 超出当前日志范围，拒绝处理
+	// 	reply.Term = rf.currentTerm
+	// 	reply.Success = false
+	// 	return
+	// }
+
+	// 更新任期和状态
+	if args.Term >= rf.currentTerm || rf.state != Follower {
+		rf.BecomeFollower(args.Term)
+	}
+	// 更新日志
+	rf.resetElectionTimer()
+	rf.commitIndex = max(rf.commitIndex, args.LeaderCommit)
+	rf.log = append(rf.log, args.Entries...)
+
+	reply.Term = rf.currentTerm
+	reply.Success = true
+	DPrintf('B', "Raft %d: receive AppendEntries RPC from leader %d, term %d, commitIndex %d", rf.me, args.LeaderId, args.Term, args.LeaderCommit)
+	return
+
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+// =================================
+
 // 运行 Raft 节点的主循环, 处理超时
 // 新建的Raft节点，一开始都是Follower状态，所以第一个先做超时处理
 /*
@@ -348,7 +418,7 @@ Leader：周期性（~100ms）向所有节点发送空 AppendEntries 心跳以�
 	    同时更新 nextIndex/matchIndex，若发现更高 term 的 RPC 返回则退回 Follower。
 */
 func (rf *Raft) handleTimeout() {
-	DPrintf(1, "Raft %d: start handleTimeout goroutine", rf.me)
+	DPrintf('A', "Raft %d: start handleTimeout goroutine", rf.me)
 	for !rf.killed() {
 		select {
 		case <-rf.randElectionTimer.C:
@@ -360,6 +430,7 @@ func (rf *Raft) handleTimeout() {
 				go rf.startElection()
 			case Leader:
 				rf.mu.Unlock()
+				return
 			}
 		}
 	}
@@ -385,7 +456,7 @@ func (rf *Raft) startElection() {
 	}
 
 	// 准备 RequestVote RPC 参数
-	DPrintf(1, "Raft %d: start election for term %d", rf.me, rf.currentTerm)
+	DPrintf('A', "Raft %d: start election for term %d", rf.me, rf.currentTerm)
 
 	lastIndex, lastTerm := rf.lastLogInfo()
 	term := rf.currentTerm
@@ -413,20 +484,20 @@ func (rf *Raft) startElection() {
 				defer rf.mu.Unlock()
 				if reply.Term > term {
 					// 发现更高任期，转为 Follower
-					DPrintf(1, "[startElection fail] Raft %d: discovers higher term %d from server %d, becomes Follower", candidateId, reply.Term, server)
+					DPrintf('A', "[startElection fail] Raft %d: discovers higher term %d from server %d, becomes Follower", candidateId, reply.Term, server)
 					rf.BecomeFollower(reply.Term)
 					return
 				}
 
 				// 仍然是 Candidate 状态，处理投票结果
 				if rf.state != Candidate {
-					DPrintf(1, "[startElection fail]Raft %d: no longer Candidate, ignore vote from server %d", candidateId, server)
+					DPrintf('A', "[startElection fail]Raft %d: no longer Candidate, ignore vote from server %d", candidateId, server)
 					return
 				}
 
 				if reply.VoteGranted && reply.Term == term {
 					muVotes.Lock()
-					DPrintf(1, "Raft %d: receive vote from server %d, term %d", candidateId, server, reply.Term)
+					DPrintf('A', "Raft %d: receive vote from server %d, term %d", candidateId, server, reply.Term)
 					votes++
 					muVotes.Unlock()
 					if votes > len(rf.peers)/2 {
@@ -436,7 +507,7 @@ func (rf *Raft) startElection() {
 							rf.nextIndex[idx] = len(rf.log)
 							rf.matchIndex[idx] = 0
 						}
-						DPrintf(1, "Raft %d: becomes Leader for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
+						DPrintf('A', "Raft %d: becomes Leader for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
 						go rf.sendHeartbeats()
 					}
 				}
@@ -452,36 +523,7 @@ func (rf *Raft) startElection() {
 	if rf.state != Candidate || rf.currentTerm != term || won {
 		return
 	}
-	DPrintf(1, "Raft %d: election failed for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
-}
-
-func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// Your code here (2A, 2B).
-	// 检查任期
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	// 检查心跳
-	DPrintf(1, "Raft %d: receive AppendEntries RPC from leader %d, term %d", rf.me, args.LeaderId, args.Term)
-
-	// 心跳处理
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		return
-	}
-	// 更新任期和状态
-	rf.BecomeFollower(args.Term)
-	// 更新日志
-	reply.Term = rf.currentTerm
-	reply.Success = true
-	return
-
-}
-
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+	DPrintf('A', "Raft %d: election failed for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
 }
 
 func (rf *Raft) sendHeartbeats() {
@@ -523,7 +565,9 @@ func (rf *Raft) sendHeartbeats() {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
 					if reply.Term > term {
+						// 这里发现更高任期，Leader 转为 Follower，重新开始超时选举（仅Leader关闭超时选举，所以这里需要重新开启）
 						rf.BecomeFollower(reply.Term)
+						go rf.handleTimeout()
 					}
 				}
 			}(i, args)
@@ -531,7 +575,7 @@ func (rf *Raft) sendHeartbeats() {
 	}
 }
 
-// 启动对新日志条目的共识过程
+// 启动对新日志条目的共识过程，追加日志到本地日志中，并向其他节点发送 AppendEntries RPC 以复制日志条目
 // 返回值：日志条目的索引、当前任期、是否为领导者
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
@@ -539,6 +583,153 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != Leader {
+		isLeader = false
+		return index, term, isLeader
+	}
+
+	// 追加日志条目到本地日志中
+	term = rf.currentTerm
+	index = len(rf.log)
+	rf.log = append(rf.log, LogEntry{
+		Command: command,
+		Term:    term,
+		Index:   index,
+	})
+	rf.persist() // 持久化状态
+	DPrintf('B', "Raft %d: receive Start command, index %d, term %d", rf.me, index, term)
+
+	// 发送 AppendEntries RPC 复制日志条目到其他节点
+	rf.matchIndex[rf.me] = index
+	rf.nextIndex[rf.me] = index + 1
+	go rf.boardcastAppendEntries()
 
 	return index, term, isLeader
+}
+
+// 广播 AppendEntries RPC 复制日志条目到其他节点
+func (rf *Raft) boardcastAppendEntries() {
+	rf.mu.Lock()
+	index := len(rf.log) - 1
+	term := rf.currentTerm
+	rf.mu.Unlock()
+
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		rf.mu.Lock()
+		args := AppendEntriesArgs{
+			Term:         term,
+			LeaderId:     rf.me,
+			PrevLogIndex: rf.nextIndex[i] - 1,
+			PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
+			Entries:      []LogEntry{rf.log[index]},
+			LeaderCommit: rf.commitIndex,
+		}
+		rf.mu.Unlock()
+		go rf.boardcastHelper(i, args)
+	}
+}
+
+func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
+	DPrintf('B', "Raft %d: send AppendEntries RPC to server %d, term %d, log index %d", rf.me, server, args.Term, args.PrevLogIndex+1)
+	var reply AppendEntriesReply
+	if rf.sendAppendEntries(server, &args, &reply) {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if reply.Term > args.Term {
+			// 这里发现更高任期，Leader 转为 Follower，重新开始超时选举（仅Leader关闭超时选举，所以这里需要重新开启）
+			rf.BecomeFollower(reply.Term)
+			go rf.handleTimeout()
+			return
+		}
+		// 如果 AppendEntries RPC 成功，更新 matchIndex 和 nextIndex
+		if reply.Success {
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+			// 如果成功，检查是否有日志条目可以提交
+			rf.tryCommit()
+		} else {
+			// 如果 AppendEntries RPC 失败，减少 nextIndex 并重试
+			rf.nextIndex[server]--
+			if rf.nextIndex[server] < 1 {
+				rf.nextIndex[server] = 1
+			} else {
+				// go rf.boardcastHelper(server, AppendEntriesArgs{
+				// 	Term:         rf.currentTerm,
+				// 	LeaderId:     rf.me,
+				// 	PrevLogIndex: rf.nextIndex[server] - 1,
+				// 	PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
+				// 	Entries:      []LogEntry{rf.log[rf.nextIndex[server]-1]},
+				// 	LeaderCommit: rf.commitIndex,
+				// })
+			}
+		}
+	}
+}
+
+// 检查是否有日志条目可以提交，如果有则更新 commitIndex
+// 注意：只能提交当前任期的日志条目，不能提交之前任期的日志条目
+func (rf *Raft) tryCommit() {
+	// 从 commitIndex + 1 开始寻找可以 commit 的最大 N
+	// 倒序寻找可能更快，只要找到一个满足条件的 N 即可
+	for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+		// 只有当前任期的日志可以通过计数方式提交
+		// 之前任期的日志只能随当前任期日志一起被间接提交 (Log Matching Property)
+		if rf.log[N].Term != rf.currentTerm {
+			break
+		}
+
+		count := 0
+		for i := range rf.peers {
+			if rf.matchIndex[i] >= N {
+				count++
+			}
+		}
+
+		if count > len(rf.peers)/2 {
+			rf.commitIndex = N
+			rf.applyCond.Broadcast() // 通知 applier goroutine 有新的日志可以应用了
+			DPrintf('B', "Raft %d: commit log index %d, term %d", rf.me, N, rf.currentTerm)
+			break // 找到最大的 N 后即可退出
+		}
+	}
+}
+
+// 应用日志到状态机
+func (rf *Raft) applier() {
+	DPrintf('B', "Raft %d: start applier goroutine", rf.me)
+	for !rf.killed() {
+		rf.mu.Lock()
+		// 检查是否有待恢复/应用的日志
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait() // 等待 commitIndex 被更新的信号
+		}
+
+		// 批量获取待恢复的日志条目
+		first := rf.lastApplied + 1
+		last := rf.commitIndex
+		entries := make([]LogEntry, last-first+1)
+		copy(entries, rf.log[first:last+1])
+
+		rf.mu.Unlock()
+
+		// 在锁外发送，防止 applyCh 阻塞导致死锁
+		for i, entry := range entries {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: first + i,
+			}
+		}
+
+		// 更新进度
+		rf.mu.Lock()
+		rf.lastApplied = max(rf.lastApplied, last)
+		rf.mu.Unlock()
+		DPrintf('B', "Raft %d: apply log index %d, term %d", rf.me, last, rf.currentTerm)
+	}
 }
