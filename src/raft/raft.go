@@ -370,20 +370,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-	// // 2. 检查日志一致性
-	// if args.PrevLogIndex >= 0 && args.PrevLogIndex < len(rf.log) {
-	// 	// 检查日志一致性
-	// 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-	// 		reply.Term = rf.currentTerm
-	// 		reply.Success = false
-	// 		return
-	// 	}
-	// } else {
-	// 	// PrevLogIndex 超出当前日志范围，拒绝处理
-	// 	reply.Term = rf.currentTerm
-	// 	reply.Success = false
-	// 	return
-	// }
+
+	// 2. 检查日志一致性
+	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
 
 	// 更新任期和状态
 	if args.Term >= rf.currentTerm || rf.state != Follower {
@@ -391,8 +384,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// 更新日志
 	rf.resetElectionTimer()
-	rf.commitIndex = max(rf.commitIndex, args.LeaderCommit)
-	rf.log = append(rf.log, args.Entries...)
+	// 从args.PrevLogIndex开始插入
+	if args.PrevLogIndex >= 0 {
+		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+	} else {
+		rf.log = append(rf.log, args.Entries...)
+	}
+	rf.commitIndex = min((len(rf.log) - 1), args.LeaderCommit)
+	rf.applyCond.Broadcast()
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
@@ -651,7 +650,7 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
 			// 如果成功，检查是否有日志条目可以提交
-			rf.tryCommit()
+			go rf.tryCommit()
 		} else {
 			// 如果 AppendEntries RPC 失败，减少 nextIndex 并重试
 			rf.nextIndex[server]--
@@ -673,9 +672,11 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 
 // 检查是否有日志条目可以提交，如果有则更新 commitIndex
 // 注意：只能提交当前任期的日志条目，不能提交之前任期的日志条目
+// TODO：锁优化
 func (rf *Raft) tryCommit() {
 	// 从 commitIndex + 1 开始寻找可以 commit 的最大 N
 	// 倒序寻找可能更快，只要找到一个满足条件的 N 即可
+
 	for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
 		// 只有当前任期的日志可以通过计数方式提交
 		// 之前任期的日志只能随当前任期日志一起被间接提交 (Log Matching Property)
@@ -701,7 +702,6 @@ func (rf *Raft) tryCommit() {
 
 // 应用日志到状态机
 func (rf *Raft) applier() {
-	DPrintf('B', "Raft %d: start applier goroutine", rf.me)
 	for !rf.killed() {
 		rf.mu.Lock()
 		// 检查是否有待恢复/应用的日志
