@@ -74,8 +74,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int  // 接收者的当前任期号
-	Success bool // 是否成功追加日志条目
+	Term          int  // 接收者的当前任期号
+	Success       bool // 是否成功追加日志条目
+	ConflictIndex int  // 日志不一致时，接收者的日志中第一个与领导者不匹配的条目的索引（仅在 Success 为 false 时有效）, 用于快速定位不一致点
 }
 
 // RequestVoteArgs 定义 RequestVote RPC 的参数结构
@@ -361,41 +362,59 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	// 检查心跳
-	DPrintf('B', "Raft %d: receive AppendEntries RPC from leader %d, term %d, commitIndex %d", rf.me, args.LeaderId, args.Term, args.LeaderCommit)
+	// DPrintf('A', "Raft %d: receive AppendEntries RPC from leader %d, term %d, commitIndex %d, prevLogIndex %d, prevLogTerm %d", rf.me, args.LeaderId, args.Term, args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
 
 	// 不合法的 AppendEntries 请求
 	// 1.任期小于自己，拒绝处理
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		reply.ConflictIndex = -1
 		return
 	}
+
+	//  心跳逻辑
 
 	// 2. 检查日志一致性
 	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		lastIndex, _ := rf.lastLogInfo()
+		if args.PrevLogIndex >= lastIndex {
+			reply.ConflictIndex = lastIndex + 1
+		} else {
+			reply.ConflictIndex = -1
+		}
 		return
 	}
 
+	reply.Term = rf.currentTerm
+	reply.Success = true
+	reply.ConflictIndex = -1
 	// 更新任期和状态
 	if args.Term >= rf.currentTerm || rf.state != Follower {
 		rf.BecomeFollower(args.Term)
 	}
 	// 更新日志
 	rf.resetElectionTimer()
+
 	// 从args.PrevLogIndex开始插入
 	if args.PrevLogIndex >= 0 {
 		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 	} else {
 		rf.log = append(rf.log, args.Entries...)
 	}
-	rf.commitIndex = min((len(rf.log) - 1), args.LeaderCommit)
-	rf.applyCond.Broadcast()
+	if args.LeaderCommit > rf.commitIndex {
+		// 取 min 是为了防止 Follower 提交了 Leader 还没发过来的日志
+		// 必须取 len(rf.log)-1，因为我们刚刚更新了 log
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.applyCond.Broadcast()
+	}
 
-	reply.Term = rf.currentTerm
-	reply.Success = true
-	DPrintf('B', "Raft %d: receive AppendEntries RPC from leader %d, term %d, commitIndex %d", rf.me, args.LeaderId, args.Term, args.LeaderCommit)
+	if args.PrevLogIndex == -1 && args.PrevLogTerm == -1 {
+		return
+	}
+	DPrintf('B', "Raft %d: receive AppendEntries RPC from leader %d, term %d, commitIndex %d, prevLogIndex %d, prevLogTerm %d", rf.me, args.LeaderId, args.Term, args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
 	return
 
 }
@@ -610,22 +629,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // 广播 AppendEntries RPC 复制日志条目到其他节点
 func (rf *Raft) boardcastAppendEntries() {
-	rf.mu.Lock()
-	index := len(rf.log) - 1
-	term := rf.currentTerm
-	rf.mu.Unlock()
-
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		rf.mu.Lock()
+		prevLogIndex := rf.nextIndex[i] - 1
 		args := AppendEntriesArgs{
-			Term:         term,
+			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
-			PrevLogIndex: rf.nextIndex[i] - 1,
-			PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
-			Entries:      []LogEntry{rf.log[index]},
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  rf.log[prevLogIndex].Term,
+			Entries:      rf.log[prevLogIndex+1:],
 			LeaderCommit: rf.commitIndex,
 		}
 		rf.mu.Unlock()
@@ -653,10 +668,10 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 			go rf.tryCommit()
 		} else {
 			// 如果 AppendEntries RPC 失败，减少 nextIndex 并重试
-			rf.nextIndex[server]--
-			if rf.nextIndex[server] < 1 {
-				rf.nextIndex[server] = 1
+			if reply.ConflictIndex > 0 {
+				rf.nextIndex[server] = reply.ConflictIndex
 			} else {
+				rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
 				// go rf.boardcastHelper(server, AppendEntriesArgs{
 				// 	Term:         rf.currentTerm,
 				// 	LeaderId:     rf.me,
@@ -676,13 +691,24 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 func (rf *Raft) tryCommit() {
 	// 从 commitIndex + 1 开始寻找可以 commit 的最大 N
 	// 倒序寻找可能更快，只要找到一个满足条件的 N 即可
+	rf.mu.Lock()
+	N := len(rf.log) - 1
+	commitIndex := rf.commitIndex
+	currentTerm := rf.currentTerm
+	num := len(rf.peers)
+	rf.mu.Unlock()
 
-	for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+	for ; N > commitIndex; N-- {
 		// 只有当前任期的日志可以通过计数方式提交
 		// 之前任期的日志只能随当前任期日志一起被间接提交 (Log Matching Property)
+		rf.mu.Lock()
+
 		if rf.log[N].Term != rf.currentTerm {
+			rf.mu.Unlock()
 			break
 		}
+
+		defer rf.mu.Unlock()
 
 		count := 0
 		for i := range rf.peers {
@@ -691,10 +717,10 @@ func (rf *Raft) tryCommit() {
 			}
 		}
 
-		if count > len(rf.peers)/2 {
+		if count > num/2 {
 			rf.commitIndex = N
 			rf.applyCond.Broadcast() // 通知 applier goroutine 有新的日志可以应用了
-			DPrintf('B', "Raft %d: commit log index %d, term %d", rf.me, N, rf.currentTerm)
+			DPrintf('B', "Raft %d: commit log index %d, term %d", rf.me, N, currentTerm)
 			break // 找到最大的 N 后即可退出
 		}
 	}
