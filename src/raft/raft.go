@@ -18,12 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"../labgob"
 	"../labrpc"
 )
 
@@ -131,6 +133,10 @@ type Raft struct {
 
 	// 通道用于处理选举和心跳
 	heartbeatCh chan struct{} // 用于接收心跳信号的通道
+
+	// 快照相关
+	lastIncludedIndex int // 快照中包含的最后一个日志条目的索引
+	lastIncludedTerm  int // 快照中包含的最后一个日志条目的任期
 }
 
 // 创建一个新的 Raft 服务器实例
@@ -212,6 +218,17 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	// 三个需要持久化的状态：currentTerm, votedFor, log
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -232,6 +249,21 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	// 解码 currentTerm, votedFor, log
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
+
 }
 
 // ============================ Helper函数 =========================================================
@@ -248,6 +280,7 @@ func (rf *Raft) BecomeFollower(term int) {
 	if term > rf.currentTerm {
 		rf.currentTerm = term
 		rf.votedFor = -1
+		rf.persist()
 	}
 	rf.resetElectionTimer()
 }
