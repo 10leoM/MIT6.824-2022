@@ -78,6 +78,7 @@ type AppendEntriesReply struct {
 	Term          int  // 接收者的当前任期号
 	Success       bool // 是否成功追加日志条目
 	ConflictIndex int  // 日志不一致时，接收者的日志中第一个与领导者不匹配的条目的索引（仅在 Success 为 false 时有效）, 用于快速定位不一致点
+	ConflictTerm  int  // 日志不一致时，接收者的日志中第一个与领导者不匹配的条目的任期号（仅在 Success 为 false 时有效）, 用于快速定位不一致点
 }
 
 // RequestVoteArgs 定义 RequestVote RPC 的参数结构
@@ -365,19 +366,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//  心跳逻辑
 
-	// 2. 检查日志一致性
-	if args.PrevLogIndex >= len(rf.log) || (args.PrevLogIndex >= 0 && rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
-		reply.Term = rf.currentTerm
+	// 2. 检查 PrevLogIndex 是否存在（日志太短）
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = -1
 		reply.Success = false
-		lastIndex, _ := rf.lastLogInfo()
-		if args.PrevLogIndex >= lastIndex {
-			reply.ConflictIndex = lastIndex + 1
-		} else {
-			reply.ConflictIndex = -1
-		}
 		return
 	}
 
+	// 3. 检查 PrevLogTerm 是否匹配
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+		// 找到该 Term 的第一条日志的索引 (用于跳过整个 Term)
+		for i := args.PrevLogIndex; i >= 0; i-- {
+			if rf.log[i].Term != reply.ConflictTerm {
+				reply.ConflictIndex = i + 1
+				break
+			}
+			// 边界情况：如果是索引0
+			if i == 0 {
+				reply.ConflictIndex = 0
+			}
+		}
+
+		reply.Success = false
+		return
+	}
+
+	// 4. 成功的处理
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	reply.ConflictIndex = -1
@@ -552,52 +569,112 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) sendHeartbeats() {
-	// 发送心跳
-	// Your code here (2A, 2B).
-	DPrintf(1, "Raft %d: start sendHeartbeats goroutine", rf.me)
-
-	for {
-		// 发送心跳逻辑
-		time.Sleep(100 * time.Millisecond)
-		if rf.killed() { // 如果在发送AppendEntries RPC过程中leader被kill了就直接结束
-			return
-		}
+	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state != Leader {
 			rf.mu.Unlock()
 			return
 		}
 
-		term := rf.currentTerm
-		commit := rf.commitIndex
-		prevLogIndex := len(rf.log) - 1
-		prevLogTerm := rf.log[prevLogIndex].Term
-		rf.mu.Unlock()
-
+		// 对每个 Peer 发送一次 AppendEntries
 		for i := range rf.peers {
 			if i == rf.me {
 				continue
 			}
+
+			// 构造参数
+			nextIndex := rf.nextIndex[i]
+			// 防御性检查
+			if nextIndex <= 0 {
+				nextIndex = 1
+			}
+
+			prevLogIndex := nextIndex - 1
+
+			// 如果 prevLogIndex 超出了当前日志范围（这不应该发生，但为了安全）
+			if prevLogIndex >= len(rf.log) {
+				prevLogIndex = len(rf.log) - 1
+			}
+
+			prevLogTerm := rf.log[prevLogIndex].Term
+
+			// 准备要发送的 Entries
+			var entries []LogEntry
+			if nextIndex < len(rf.log) {
+				entries = make([]LogEntry, len(rf.log)-nextIndex)
+				copy(entries, rf.log[nextIndex:])
+			}
+
 			args := AppendEntriesArgs{
-				Term:         term,
+				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
-				Entries:      nil,
-				LeaderCommit: commit,
+				Entries:      entries,
+				LeaderCommit: rf.commitIndex,
 			}
+
+			// 异步发送，不要阻塞主循环
 			go func(server int, args AppendEntriesArgs) {
 				var reply AppendEntriesReply
 				if rf.sendAppendEntries(server, &args, &reply) {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
-					if reply.Term > term {
-						// 这里发现更高任期，Leader 转为 Follower，重新开始超时选举（仅Leader关闭超时选举，所以这里需要重新开启）
-						rf.BecomeFollower(reply.Term)
+
+					// 检查状态
+					if rf.state != Leader || rf.currentTerm != args.Term {
+						return
+					}
+
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.state = Follower
+						rf.votedFor = -1
+						rf.persist()
+						return
+					}
+
+					if reply.Success {
+						// 成功，更新 matchIndex 和 nextIndex
+						match := args.PrevLogIndex + len(args.Entries)
+						if match > rf.matchIndex[server] {
+							rf.matchIndex[server] = match
+							rf.nextIndex[server] = match + 1
+							rf.tryCommit()
+						}
+					} else {
+						// 失败，处理 Conflict（快速回退）
+						// ... 此处保留你之前的快速回退逻辑 ...
+						if reply.ConflictTerm == -1 {
+							rf.nextIndex[server] = reply.ConflictIndex
+						} else {
+							found := false
+							lastIndexInTerm := -1
+							for i := len(rf.log) - 1; i >= 0; i-- {
+								if rf.log[i].Term == reply.ConflictTerm {
+									found = true
+									lastIndexInTerm = i
+									break
+								}
+							}
+							if found {
+								rf.nextIndex[server] = lastIndexInTerm + 1
+							} else {
+								rf.nextIndex[server] = reply.ConflictIndex
+							}
+						}
+						// 兜底
+						if rf.nextIndex[server] < 1 {
+							rf.nextIndex[server] = 1
+						}
 					}
 				}
 			}(i, args)
 		}
+		rf.mu.Unlock()
+
+		// 频率不要太快也不要太慢，100ms 是比较合理的
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -686,14 +763,46 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 			}
 		} else {
 			// 如果 AppendEntries RPC 失败，减少 nextIndex 并重试
-			if reply.ConflictIndex > 0 {
-				rf.nextIndex[server] = reply.ConflictIndex
-				// 优化：如果 ConflictIndex 指向的 Term 也不匹配，可以更激进，但目前这样足够 Lab2
-			} else {
-				rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
-				// 可选：立即重试（加速日志对其），但在 Lab2 中依赖下一次心跳通常也足够
-				// 如果要重试，就在这里再次触发 prepare & send
+			// 如果是因为 Term 过期
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.state = Follower
+				rf.votedFor = -1
+				rf.persist()
+				return
 			}
+
+			// 快速回退逻辑
+			if reply.ConflictTerm == -1 {
+				// Case 1: Follower 的日志太短
+				rf.nextIndex[server] = reply.ConflictIndex
+			} else {
+				// Case 2: Follower 在 PrevLogIndex 处有日志，但在 Term 上冲突
+				// 尝试查找 Leader 日志中是否包含 ConflictTerm
+				found := false
+				var lastIndexInTerm int
+				for i := len(rf.log) - 1; i >= 0; i-- {
+					if rf.log[i].Term == reply.ConflictTerm {
+						found = true
+						lastIndexInTerm = i
+						break
+					}
+				}
+
+				if found {
+					// 如果 Leader 也有这个 Term 的日志，nextIndex 设为该 Term 的最后一条之后
+					rf.nextIndex[server] = lastIndexInTerm + 1
+				} else {
+					// 如果 Leader 没有这个 Term，直接跳过 Follower 该 Term 的所有日志
+					rf.nextIndex[server] = reply.ConflictIndex
+				}
+			}
+
+			// 兜底：防止 nextIndex 倒退得太离谱（虽然上面逻辑应该保证了正确性）
+			if rf.nextIndex[server] < 1 {
+				rf.nextIndex[server] = 1
+			}
+
 		}
 	}
 }
