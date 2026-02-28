@@ -19,6 +19,7 @@ package raft
 
 import (
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,7 +59,7 @@ const (
 type LogEntry struct {
 	Command interface{} // 客户端请求的具体命令
 	Term    int         // 该日志条目被添加时的任期号
-	Index   int         // 该日志条目的索引
+	Index   int         // 该日志条目的索引(为什么要记录索引？因为日志条目可能会被删除，索引可以帮助我们定位日志条目在日志中的位置)
 }
 
 // AppendEntriesArgs 定义 AppendEntries RPC 的参数结构
@@ -128,7 +129,6 @@ type Raft struct {
 	lastHeard         time.Time   // 上次收到心跳或投票请求的时间
 
 	// 通道用于处理选举和心跳
-	voteCh      chan struct{} // 用于接收投票结果的通道，Follower代表发送投票，Candidate代表收到投票
 	heartbeatCh chan struct{} // 用于接收心跳信号的通道
 }
 
@@ -161,7 +161,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	// 初始化选举定时器相关状态
-	rf.voteCh = make(chan struct{}, 1)
 	rf.heartbeatCh = make(chan struct{}, 1)
 
 	// 设置随机选举超时时间
@@ -169,16 +168,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.randElectionTimer = time.NewTimer(time.Duration(timeout) * time.Millisecond)
 	rf.resetElectionTimer()
 
-	// 启动后台 goroutine 处理选举和心跳
-	go rf.handleTimeout()
-
 	// 初始化 applyCond 条件变量
 	rf.applyCond = sync.NewCond(&rf.mu)
-	// 启动 applier goroutine 处理日志应用
-	go rf.applier()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	// 启动 applier goroutine 处理日志应用
+	go rf.applier()
+
+	// 启动后台 goroutine 处理选举和心跳
+	go rf.handleTimeout()
 
 	return rf
 }
@@ -237,13 +237,8 @@ func (rf *Raft) readPersist(data []byte) {
 
 // 获取日志的最后一个条目的索引和任期号
 func (rf *Raft) lastLogInfo() (int, int) {
-	lastIndex := len(rf.log) - 1
-	// 如果日志为空，返回 -1
-	if lastIndex < 0 {
-		return -1, -1
-	}
-	lastTerm := rf.log[lastIndex].Term
-	return lastIndex, lastTerm
+	l := len(rf.log)
+	return l - 1, rf.log[l-1].Term
 }
 
 // 转换为 Follower 状态
@@ -332,11 +327,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.resetElectionTimer()
 		// 持久化
 		rf.persist()
-		// 通知选举协程收到投票
-		select {
-		case rf.voteCh <- struct{}{}:
-		default:
-		}
 		return
 	}
 
@@ -395,15 +385,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm || rf.state != Follower {
 		rf.BecomeFollower(args.Term)
 	}
-	// 更新日志
 	rf.resetElectionTimer()
 
-	// 从args.PrevLogIndex开始插入
-	if args.PrevLogIndex >= 0 {
-		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-	} else {
-		rf.log = append(rf.log, args.Entries...)
+	// 更新日志
+	logChanged := false // 标记日志是否发生变化
+	// 找到第一个不匹配的点
+	for i, entry := range args.Entries {
+		index := args.PrevLogIndex + 1 + i
+		if index < len(rf.log) {
+			if rf.log[index].Term != entry.Term {
+				// 冲突：截断并追加
+				rf.log = rf.log[:index]
+				rf.log = append(rf.log, args.Entries[i:]...)
+				logChanged = true
+				break
+			}
+			// Term 匹配，跳过（保留原样）
+		} else {
+			// 超出范围：直接追加
+			rf.log = append(rf.log, args.Entries[i:]...)
+			logChanged = true
+			break
+		}
 	}
+
+	if logChanged {
+		rf.persist()
+	}
+
 	if args.LeaderCommit > rf.commitIndex {
 		// 取 min 是为了防止 Follower 提交了 Leader 还没发过来的日志
 		// 必须取 len(rf.log)-1，因为我们刚刚更新了 log
@@ -416,7 +425,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	DPrintf('B', "Raft %d: receive AppendEntries RPC from leader %d, term %d, commitIndex %d, prevLogIndex %d, prevLogTerm %d", rf.me, args.LeaderId, args.Term, args.LeaderCommit, args.PrevLogIndex, args.PrevLogTerm)
 	return
-
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -448,7 +456,6 @@ func (rf *Raft) handleTimeout() {
 				go rf.startElection()
 			case Leader:
 				rf.mu.Unlock()
-				return
 			}
 		}
 	}
@@ -563,6 +570,8 @@ func (rf *Raft) sendHeartbeats() {
 
 		term := rf.currentTerm
 		commit := rf.commitIndex
+		prevLogIndex := len(rf.log) - 1
+		prevLogTerm := rf.log[prevLogIndex].Term
 		rf.mu.Unlock()
 
 		for i := range rf.peers {
@@ -572,8 +581,8 @@ func (rf *Raft) sendHeartbeats() {
 			args := AppendEntriesArgs{
 				Term:         term,
 				LeaderId:     rf.me,
-				PrevLogIndex: -1,
-				PrevLogTerm:  -1,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
 				Entries:      nil,
 				LeaderCommit: commit,
 			}
@@ -585,7 +594,6 @@ func (rf *Raft) sendHeartbeats() {
 					if reply.Term > term {
 						// 这里发现更高任期，Leader 转为 Follower，重新开始超时选举（仅Leader关闭超时选举，所以这里需要重新开启）
 						rf.BecomeFollower(reply.Term)
-						go rf.handleTimeout()
 					}
 				}
 			}(i, args)
@@ -634,13 +642,17 @@ func (rf *Raft) boardcastAppendEntries() {
 			continue
 		}
 		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
 		prevLogIndex := rf.nextIndex[i] - 1
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
 			PrevLogIndex: prevLogIndex,
 			PrevLogTerm:  rf.log[prevLogIndex].Term,
-			Entries:      rf.log[prevLogIndex+1:],
+			Entries:      rf.log[rf.nextIndex[i]:],
 			LeaderCommit: rf.commitIndex,
 		}
 		rf.mu.Unlock()
@@ -654,32 +666,33 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 	if rf.sendAppendEntries(server, &args, &reply) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if reply.Term > args.Term {
+
+		// 检查状态是否过期
+		if rf.state != Leader || rf.currentTerm != args.Term {
+			return
+		}
+		if reply.Term > rf.currentTerm {
 			// 这里发现更高任期，Leader 转为 Follower，重新开始超时选举（仅Leader关闭超时选举，所以这里需要重新开启）
 			rf.BecomeFollower(reply.Term)
-			go rf.handleTimeout()
 			return
 		}
 		// 如果 AppendEntries RPC 成功，更新 matchIndex 和 nextIndex
 		if reply.Success {
-			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-			rf.nextIndex[server] = rf.matchIndex[server] + 1
-			// 如果成功，检查是否有日志条目可以提交
-			go rf.tryCommit()
+			newMatch := args.PrevLogIndex + len(args.Entries)
+			if newMatch > rf.matchIndex[server] {
+				rf.matchIndex[server] = newMatch
+				rf.nextIndex[server] = rf.matchIndex[server] + 1
+				rf.tryCommit() // 直接在锁内调用优化后的 tryCommit
+			}
 		} else {
 			// 如果 AppendEntries RPC 失败，减少 nextIndex 并重试
 			if reply.ConflictIndex > 0 {
 				rf.nextIndex[server] = reply.ConflictIndex
+				// 优化：如果 ConflictIndex 指向的 Term 也不匹配，可以更激进，但目前这样足够 Lab2
 			} else {
 				rf.nextIndex[server] = max(1, rf.nextIndex[server]-1)
-				// go rf.boardcastHelper(server, AppendEntriesArgs{
-				// 	Term:         rf.currentTerm,
-				// 	LeaderId:     rf.me,
-				// 	PrevLogIndex: rf.nextIndex[server] - 1,
-				// 	PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
-				// 	Entries:      []LogEntry{rf.log[rf.nextIndex[server]-1]},
-				// 	LeaderCommit: rf.commitIndex,
-				// })
+				// 可选：立即重试（加速日志对其），但在 Lab2 中依赖下一次心跳通常也足够
+				// 如果要重试，就在这里再次触发 prepare & send
 			}
 		}
 	}
@@ -689,39 +702,28 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 // 注意：只能提交当前任期的日志条目，不能提交之前任期的日志条目
 // TODO：锁优化
 func (rf *Raft) tryCommit() {
-	// 从 commitIndex + 1 开始寻找可以 commit 的最大 N
-	// 倒序寻找可能更快，只要找到一个满足条件的 N 即可
-	rf.mu.Lock()
-	N := len(rf.log) - 1
-	commitIndex := rf.commitIndex
-	currentTerm := rf.currentTerm
-	num := len(rf.peers)
-	rf.mu.Unlock()
+	if rf.state != Leader {
+		return
+	}
 
-	for ; N > commitIndex; N-- {
-		// 只有当前任期的日志可以通过计数方式提交
-		// 之前任期的日志只能随当前任期日志一起被间接提交 (Log Matching Property)
-		rf.mu.Lock()
+	// 复制 matchIndex 以便排序，避免修改原切片
+	matchIndexes := make([]int, len(rf.matchIndex))
+	copy(matchIndexes, rf.matchIndex)
+	matchIndexes[rf.me] = len(rf.log) - 1 // 加上 Leader 自己的
+	sort.Ints(matchIndexes)
 
-		if rf.log[N].Term != rf.currentTerm {
-			rf.mu.Unlock()
-			break
-		}
+	// 获取中位数 (Majority Index)
+	// 比如 5 个节点，排序后是 [1, 2, 5, 5, 5]，中位数是下标 2 (5/2=2)，即 5
+	// 只要有半数以上节点存储了该日志，该日志就安全
+	n := len(rf.peers)
+	newCommitIndex := matchIndexes[n-(n/2+1)]
 
-		defer rf.mu.Unlock()
-
-		count := 0
-		for i := range rf.peers {
-			if rf.matchIndex[i] >= N {
-				count++
-			}
-		}
-
-		if count > num/2 {
-			rf.commitIndex = N
-			rf.applyCond.Broadcast() // 通知 applier goroutine 有新的日志可以应用了
-			DPrintf('B', "Raft %d: commit log index %d, term %d", rf.me, N, currentTerm)
-			break // 找到最大的 N 后即可退出
+	if newCommitIndex > rf.commitIndex {
+		// 只有当前任期的日志可以提交
+		if rf.log[newCommitIndex].Term == rf.currentTerm {
+			rf.commitIndex = newCommitIndex
+			rf.applyCond.Broadcast()
+			DPrintf('B', "Raft %d: commit log index %d, term %d", rf.me, rf.commitIndex, rf.currentTerm)
 		}
 	}
 }
