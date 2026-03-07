@@ -648,61 +648,62 @@ func (rf *Raft) sendHeartbeats() {
 			}
 
 			// 异步发送，不要阻塞主循环
-			go func(server int, args AppendEntriesArgs) {
-				var reply AppendEntriesReply
-				if rf.sendAppendEntries(server, &args, &reply) {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
+			// go func(server int, args AppendEntriesArgs) {
+			// 	var reply AppendEntriesReply
+			// 	if rf.sendAppendEntries(server, &args, &reply) {
+			// 		rf.mu.Lock()
+			// 		defer rf.mu.Unlock()
 
-					// 检查状态
-					if rf.state != Leader || rf.currentTerm != args.Term {
-						return
-					}
+			// 		// 检查状态
+			// 		if rf.state != Leader || rf.currentTerm != args.Term {
+			// 			return
+			// 		}
 
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.state = Follower
-						rf.votedFor = -1
-						rf.persist()
-						return
-					}
+			// 		if reply.Term > rf.currentTerm {
+			// 			rf.currentTerm = reply.Term
+			// 			rf.state = Follower
+			// 			rf.votedFor = -1
+			// 			rf.persist()
+			// 			return
+			// 		}
 
-					if reply.Success {
-						// 成功，更新 matchIndex 和 nextIndex
-						match := args.PrevLogIndex + len(args.Entries)
-						if match > rf.matchIndex[server] {
-							rf.matchIndex[server] = match
-							rf.nextIndex[server] = match + 1
-							rf.tryCommit()
-						}
-					} else {
-						// 失败，处理 Conflict（快速回退）
-						// ... 此处保留你之前的快速回退逻辑 ...
-						if reply.ConflictTerm == -1 {
-							rf.nextIndex[server] = reply.ConflictIndex
-						} else {
-							found := false
-							lastIndexInTerm := -1
-							for i := len(rf.log) - 1; i >= 0; i-- {
-								if rf.log[i].Term == reply.ConflictTerm {
-									found = true
-									lastIndexInTerm = i
-									break
-								}
-							}
-							if found {
-								rf.nextIndex[server] = lastIndexInTerm + 1
-							} else {
-								rf.nextIndex[server] = reply.ConflictIndex
-							}
-						}
-						// 兜底
-						if rf.nextIndex[server] < 1 {
-							rf.nextIndex[server] = 1
-						}
-					}
-				}
-			}(i, args)
+			// 		if reply.Success {
+			// 			// 成功，更新 matchIndex 和 nextIndex
+			// 			match := args.PrevLogIndex + len(args.Entries)
+			// 			if match > rf.matchIndex[server] {
+			// 				rf.matchIndex[server] = match
+			// 				rf.nextIndex[server] = match + 1
+			// 				rf.tryCommit()
+			// 			}
+			// 		} else {
+			// 			// 失败，处理 Conflict（快速回退）
+			// 			// 快速回退逻辑
+			// 			if reply.ConflictTerm == -1 {
+			// 				rf.nextIndex[server] = reply.ConflictIndex
+			// 			} else {
+			// 				found := false
+			// 				lastIndexInTerm := -1
+			// 				for i := len(rf.log) - 1; i >= 0; i-- {
+			// 					if rf.log[i].Term == reply.ConflictTerm {
+			// 						found = true
+			// 						lastIndexInTerm = i
+			// 						break
+			// 					}
+			// 				}
+			// 				if found {
+			// 					rf.nextIndex[server] = lastIndexInTerm + 1
+			// 				} else {
+			// 					rf.nextIndex[server] = reply.ConflictIndex
+			// 				}
+			// 			}
+			// 			// 兜底
+			// 			if rf.nextIndex[server] < 1 {
+			// 				rf.nextIndex[server] = 1
+			// 			}
+			// 		}
+			// 	}
+			// }(i, args)
+			go rf.boardcastHelper(i, args)
 		}
 		rf.mu.Unlock()
 
@@ -740,7 +741,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 发送 AppendEntries RPC 复制日志条目到其他节点
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
-	go rf.boardcastAppendEntries()
+	// go rf.boardcastAppendEntries()
 
 	return index, term, isLeader
 }
@@ -770,6 +771,7 @@ func (rf *Raft) boardcastAppendEntries() {
 	}
 }
 
+// 废弃
 func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 	DPrintf('B', "Raft %d: send AppendEntries RPC to server %d, term %d, log index %d", rf.me, server, args.Term, args.PrevLogIndex+1)
 	var reply AppendEntriesReply
@@ -786,25 +788,16 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 			rf.BecomeFollower(reply.Term)
 			return
 		}
-		// 如果 AppendEntries RPC 成功，更新 matchIndex 和 nextIndex
-		if reply.Success {
+		// 如果 AppendEntries RPC 成功且不是心跳，更新 matchIndex 和 nextIndex
+		if reply.Success && len(args.Entries) > 0 {
 			newMatch := args.PrevLogIndex + len(args.Entries)
 			if newMatch > rf.matchIndex[server] {
 				rf.matchIndex[server] = newMatch
 				rf.nextIndex[server] = rf.matchIndex[server] + 1
-				rf.tryCommit() // 直接在锁内调用优化后的 tryCommit
+				rf.tryCommit() // 直接在锁内调用 tryCommit
 			}
-		} else {
-			// 如果 AppendEntries RPC 失败，减少 nextIndex 并重试
-			// 如果是因为 Term 过期
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.state = Follower
-				rf.votedFor = -1
-				rf.persist()
-				return
-			}
-
+		} else if !reply.Success {
+			// 失败
 			// 快速回退逻辑
 			if reply.ConflictTerm == -1 {
 				// Case 1: Follower 的日志太短
@@ -829,6 +822,9 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 					// 如果 Leader 没有这个 Term，直接跳过 Follower 该 Term 的所有日志
 					rf.nextIndex[server] = reply.ConflictIndex
 				}
+
+				// 重新发起 RPC
+
 			}
 
 			// 兜底：防止 nextIndex 倒退得太离谱（虽然上面逻辑应该保证了正确性）
