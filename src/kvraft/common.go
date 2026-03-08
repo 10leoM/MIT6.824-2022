@@ -1,5 +1,6 @@
 package kvraft
 
+// 错误码
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
@@ -16,6 +17,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId  int64 // 客户端ID
+	RequestId int64 // 请求ID
 }
 
 type PutAppendReply struct {
@@ -25,6 +28,8 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ClientId  int64 // 客户端ID
+	RequestId int64 // 请求ID
 }
 
 type GetReply struct {

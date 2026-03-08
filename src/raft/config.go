@@ -38,14 +38,15 @@ func makeSeed() int64 {
 	return x
 }
 
+// 测试配置结构体，用于管理 Raft 测试环境
 type config struct {
-	mu        sync.Mutex
-	t         *testing.T
-	net       *labrpc.Network
-	n         int
-	rafts     []*Raft
-	applyErr  []string // from apply channel readers
-	connected []bool   // whether each server is on the net
+	mu        sync.Mutex      // 互斥锁，保护对配置数据的并发访问
+	t         *testing.T      // 测试对象，用于报告测试结果
+	net       *labrpc.Network // 模拟网络环境，管理服务器之间的通信
+	n         int             // 服务器数量
+	rafts     []*Raft         // Raft 实例数组，每个元素对应一个服务器
+	applyErr  []string        // from apply channel readers
+	connected []bool          // whether each server is on the net
 	saved     []*Persister
 	endnames  [][]string            // the port file names each sends to
 	logs      []map[int]interface{} // copy of each server's committed entries
@@ -429,6 +430,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
+// 提交一个命令到 Raft 集群，等待至少 n 个节点确认
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0

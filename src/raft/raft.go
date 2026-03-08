@@ -132,7 +132,8 @@ type Raft struct {
 	lastHeard         time.Time   // 上次收到心跳或投票请求的时间
 
 	// 通道用于处理选举和心跳
-	heartbeatCh chan struct{} // 用于接收心跳信号的通道
+	heartbeatCh   chan struct{} // 用于接收心跳信号的通道
+	triggerSendCh chan bool     // Trigger sending AppendEntries immediately
 
 	// 快照相关
 	lastIncludedIndex int // 快照中包含的最后一个日志条目的索引
@@ -169,6 +170,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// 初始化选举定时器相关状态
 	rf.heartbeatCh = make(chan struct{}, 1)
+	rf.triggerSendCh = make(chan bool, 1)
 
 	// 设置随机选举超时时间
 	timeout := 400 + rand.Intn(200)
@@ -305,6 +307,7 @@ func (rf *Raft) Convert2Candidate() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist() // 必须持久化：修改了 currentTerm 和 votedFor
 	rf.resetElectionTimer()
 }
 
@@ -328,7 +331,7 @@ func (rf *Raft) killed() bool {
 // 处理 RequestVote RPC 请求
 // 返回值：是否投票给该候选人
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	// Your code here (2A).
 	// 2A: 实现投票逻辑
 	// 2A1: 检查任期号，更新状态
 	rf.mu.Lock()
@@ -601,6 +604,13 @@ func (rf *Raft) startElection() {
 	DPrintf('A', "Raft %d: election failed for term %d, Get %d votes, peers %d", rf.me, term, votes, len(rf.peers))
 }
 
+func (rf *Raft) triggerSend() {
+	select {
+	case rf.triggerSendCh <- true:
+	default:
+	}
+}
+
 func (rf *Raft) sendHeartbeats() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -708,7 +718,10 @@ func (rf *Raft) sendHeartbeats() {
 		rf.mu.Unlock()
 
 		// 频率不要太快也不要太慢，100ms 是比较合理的
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-rf.triggerSendCh:
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
 
@@ -741,7 +754,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 发送 AppendEntries RPC 复制日志条目到其他节点
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
-	// go rf.boardcastAppendEntries()
+	rf.triggerSend() // 接收到Start指令后立即触发一次日志复制，避免依赖心跳超时
 
 	return index, term, isLeader
 }
@@ -822,15 +835,13 @@ func (rf *Raft) boardcastHelper(server int, args AppendEntriesArgs) {
 					// 如果 Leader 没有这个 Term，直接跳过 Follower 该 Term 的所有日志
 					rf.nextIndex[server] = reply.ConflictIndex
 				}
-
-				// 重新发起 RPC
-
 			}
 
 			// 兜底：防止 nextIndex 倒退得太离谱（虽然上面逻辑应该保证了正确性）
 			if rf.nextIndex[server] < 1 {
 				rf.nextIndex[server] = 1
 			}
+			rf.triggerSend()
 
 		}
 	}
