@@ -41,7 +41,7 @@ type KVServer struct {
 	applyCh chan raft.ApplyMsg // 应用通道，用于接收 Raft 应用的指令
 	dead    int32              // set by Kill()，是否已被终止
 
-	maxraftstate int // snapshot if log grows this big，Raft 日志最大大小，超过该值则触发快照
+	maxraftstate int // snapshot if log grows this big，Raft 日志大小超过该值时进行快照，-1表示不进行快照
 
 	// Your definitions here.
 	data        map[string]string   // 键值对存储
