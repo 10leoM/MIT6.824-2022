@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,7 @@ type KVServer struct {
 	dead    int32              // set by Kill()，是否已被终止
 
 	maxraftstate int // snapshot if log grows this big，Raft 日志大小超过该值时进行快照，-1表示不进行快照
+	// persister    *raft.Persister // == 新增 == 保存持久化器以检查状态大小
 
 	// Your definitions here.
 	data        map[string]string   // 键值对存储
@@ -187,10 +189,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.lastApplied = make(map[int64]int64)
 	kv.waitCh = make(map[int]chan Result)
 
+	kv.readSnapshot(persister.ReadSnapshot()) // 从持久化存储中读取快照恢复状态
+
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	go kv.applier()
+
+	// fmt.Printf("KVServer %d started, maxraftstate %d\n", me, maxraftstate)
 
 	return kv
 }
@@ -198,6 +204,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *KVServer) applier() {
 	for !kv.killed() {
 		// 1. 从 applyCh 读取 Raft 提交的日志
+		// msg格式：CommandValid=true, CommandIndex=日志索引, Command=Op结构体
 		msg := <-kv.applyCh
 		if msg.CommandValid {
 			kv.mu.Lock()
@@ -250,7 +257,50 @@ func (kv *KVServer) applier() {
 				}
 			}
 
+			// 6.检测状态大小，必要时进行快照
+			if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() > kv.maxraftstate {
+				// 生成快照数据
+				snapshot := kv.getSnapshotBytes()
+				// 进行快照，传入当前日志索引和快照数据
+				kv.rf.Snapshot(msg.CommandIndex, snapshot)
+				// 注意：Raft 在收到 Snapshot() 调用后会丢弃该索引之前的日志，因此这里不需要手动删除日志
+				// 但我们需要确保在快照之后的日志中包含足够的信息来恢复状态（即快照中包含了最新的状态）
+				// 因此我们在 getSnapshotBytes() 中序列化了当前的键值对和客户端请求 ID 映射
+			}
+			kv.mu.Unlock()
+		} else if msg.SnapshotValid {
+			// 6. 处理快照
+			kv.mu.Lock()
+			kv.readSnapshot(msg.Snapshot)
 			kv.mu.Unlock()
 		}
 	}
+}
+
+func (kv *KVServer) readSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+
+	var data map[string]string
+	var lastApplied map[int64]int64
+
+	if d.Decode(&data) != nil || d.Decode(&lastApplied) != nil {
+		log.Fatalf("KVServer %v readSnapshot decode error", kv.me)
+	} else {
+		kv.data = data
+		kv.lastApplied = lastApplied
+	}
+}
+
+// 序列化当前状态为快照
+func (kv *KVServer) getSnapshotBytes() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	// 注意：被编码的结构体内字段首字母必须大写（这里是内置类型 map，所以没问题）
+	e.Encode(kv.data)
+	e.Encode(kv.lastApplied)
+	return w.Bytes()
 }

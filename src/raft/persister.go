@@ -13,8 +13,8 @@ import "sync"
 
 type Persister struct {
 	mu        sync.Mutex
-	raftstate []byte
-	snapshot  []byte
+	raftstate []byte // Raft 状态，包括当前任期号、已提交的日志索引、日志条目等
+	snapshot  []byte // K/V 服务器快照数据
 }
 
 func MakePersister() *Persister {
