@@ -538,11 +538,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	// Your code here (Lab 3).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	DPrintf('D', "Raft %d: receive InstallSnapshot RPC from leader %d, term %d, lastIncludedIndex %d, lastIncludedTerm %d, serverLastIncludedIndex %d, serverLastIncludedTerm %d", rf.me, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludedTerm, rf.lastIncludedIndex, rf.lastIncludedTerm)
 
 	// 1. 检查任期号，更新状态
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		rf.mu.Unlock()
 		return
 	}
 
@@ -574,30 +576,27 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 
-	// 5. 更新 commitIndex 和 lastApplied
+	// 5. 更新 commitIndex
 	if rf.commitIndex < args.LastIncludedIndex {
 		rf.commitIndex = args.LastIncludedIndex
-	}
-	if rf.lastApplied < args.LastIncludedIndex {
-		rf.lastApplied = args.LastIncludedIndex
 	}
 	rf.persister.SaveStateAndSnapshot(rf.getRaftStateBytes(), args.Data)
 
 	// 6. 回复客户端
 	reply.Term = rf.currentTerm
-	rf.mu.Unlock()
 
 	// 7. 将快照数据发送给状态机
-	go func() {
-		applyMsg := ApplyMsg{
-			CommandValid:  false,
-			SnapshotValid: true,
-			Snapshot:      args.Data,
-			SnapshotTerm:  args.LastIncludedTerm,
-			SnapshotIndex: args.LastIncludedIndex,
-		}
-		rf.applyCh <- applyMsg
-	}()
+	// go func() {
+	// 	applyMsg := ApplyMsg{
+	// 		CommandValid:  false,
+	// 		SnapshotValid: true,
+	// 		Snapshot:      args.Data,
+	// 		SnapshotTerm:  args.LastIncludedTerm,
+	// 		SnapshotIndex: args.LastIncludedIndex,
+	// 	}
+	// 	rf.applyCh <- applyMsg
+	// }()
+	rf.applyCond.Broadcast()
 
 	DPrintf('D', "Raft %d: receive InstallSnapshot RPC from leader %d, term %d, lastIncludedIndex %d, lastIncludedTerm %d", rf.me, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludedTerm)
 }
@@ -772,6 +771,7 @@ func (rf *Raft) sendHeartbeats() {
 					// 实际上可以根据快照大小和网络状况分块传输，增加 Offset 和 Done 字段来标识分块状态
 					// 但对于 Lab 3 来说，直接发送整个快照更简单，也能满足要求
 				}
+				DPrintf('D', "Raft %d: send InstallSnapshot RPC to server %d, term %d, nextIndex %d, lastIncludedIndex %d, lastIncludedTerm %d", rf.me, i, snapArgs.Term, nextIndex, snapArgs.LastIncludedIndex, snapArgs.LastIncludedTerm)
 				go rf.sendSnapshotHelper(i, snapArgs)
 				continue
 			}
@@ -941,6 +941,26 @@ func (rf *Raft) applier() {
 			rf.applyCond.Wait() // 等待 commitIndex 被更新的信号
 		}
 
+		// 如果上层当前的应用进度落后于刚收到的快照进度，统一在此下发 Snapshot！
+		if rf.lastApplied < rf.lastIncludedIndex {
+			applyMsg := ApplyMsg{
+				CommandValid:  false,
+				SnapshotValid: true,
+				Snapshot:      rf.persister.ReadSnapshot(),
+				SnapshotTerm:  rf.lastIncludedTerm,
+				SnapshotIndex: rf.lastIncludedIndex,
+			}
+			rf.mu.Unlock() // 获取好消息后脱离锁发送，防止阻塞死锁
+
+			rf.applyCh <- applyMsg
+
+			rf.mu.Lock()
+			rf.lastApplied = max(rf.lastApplied, rf.lastIncludedIndex)
+			rf.commitIndex = max(rf.commitIndex, rf.lastIncludedIndex)
+			rf.mu.Unlock()
+			continue // 完成快照处理后重新进入一轮判定
+		}
+
 		// 批量获取待恢复的日志条目
 		first := rf.lastApplied + 1
 		last := rf.commitIndex
@@ -1008,7 +1028,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 	// 保存 Raft 状态和快照
 	rf.persister.SaveStateAndSnapshot(rf.getRaftStateBytes(), snapshot)
-	DPrintf('D', "Raft %d: snapshot index %d, currentTerm %d", rf.me, index, rf.currentTerm)
+	DPrintf('D', "Raft %d: snapshot index %d, lastIncludedTerm %d, log0Index %d, log0Term %d", rf.me, index, rf.lastIncludedTerm, rf.log[0].Index, rf.log[0].Term)
 }
 
 // 发送 InstallSnapshot RPC 给指定的 follower
@@ -1017,12 +1037,14 @@ func (rf *Raft) sendSnapshotHelper(server int, args InstallSnapshotArgs) {
 	if rf.sendInstallSnapshot(server, &args, &reply) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
+		// 落后回复
 		if rf.state != Leader || rf.currentTerm != args.Term {
 			return
 		}
 
 		if reply.Term > rf.currentTerm {
 			rf.BecomeFollower(reply.Term)
+			return
 		}
 
 		// 成功发送快照后，更新该 follower 的 nextIndex 和 matchIndex
